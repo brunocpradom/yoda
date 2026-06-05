@@ -100,6 +100,22 @@ fn truncate(s: String) -> String {
     format!("{cut}\n…[output truncated]")
 }
 
+/// Normalize a user/model-supplied URL for `web_fetch`: accept http(s) as-is,
+/// reject other explicit schemes (e.g. `file:`), and assume `https://` for a
+/// bare host like `www.example.com` so the model doesn't have to remember it.
+fn normalize_url(input: &str) -> Result<String> {
+    let u = input.trim();
+    if u.is_empty() {
+        Err(anyhow!("empty URL"))
+    } else if u.starts_with("http://") || u.starts_with("https://") {
+        Ok(u.to_string())
+    } else if u.contains("://") {
+        Err(anyhow!("only http and https URLs are supported"))
+    } else {
+        Ok(format!("https://{u}"))
+    }
+}
+
 // --- tools ---
 
 struct ReadFile;
@@ -440,16 +456,16 @@ impl Tool for WebFetch {
         })
     }
     fn actions(&self, args: &Value) -> Vec<Action> {
+        // Show the normalized URL in the permission prompt when we can.
         match args.get("url").and_then(|v| v.as_str()) {
-            Some(u) => vec![Action::Fetch(u.to_string())],
+            Some(u) => vec![Action::Fetch(
+                normalize_url(u).unwrap_or_else(|_| u.to_string()),
+            )],
             None => vec![],
         }
     }
     async fn run(&self, args: &Value) -> Result<String> {
-        let url = get_str(args, "url")?;
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return Err(anyhow!("only http and https URLs are supported"));
-        }
+        let url = normalize_url(&get_str(args, "url")?)?;
 
         let client = reqwest::Client::builder()
             .user_agent("yoda/0.1 (+web_fetch)")
@@ -496,6 +512,30 @@ impl Tool for WebFetch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_url_keeps_http_and_https() {
+        assert_eq!(normalize_url("https://x.com/y").unwrap(), "https://x.com/y");
+        assert_eq!(normalize_url("http://x.com").unwrap(), "http://x.com");
+    }
+
+    #[test]
+    fn normalize_url_prepends_https_for_bare_host() {
+        assert_eq!(
+            normalize_url("www.example.com").unwrap(),
+            "https://www.example.com"
+        );
+        assert_eq!(
+            normalize_url("example.com/path").unwrap(),
+            "https://example.com/path"
+        );
+    }
+
+    #[test]
+    fn normalize_url_rejects_other_schemes_and_empty() {
+        assert!(normalize_url("file:///etc/passwd").is_err());
+        assert!(normalize_url("   ").is_err());
+    }
 
     // Network-dependent; run with `cargo test -- --ignored`.
     #[tokio::test]
