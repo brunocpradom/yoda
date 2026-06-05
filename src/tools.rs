@@ -1,7 +1,7 @@
 //! The tool set the agent can call. Kept deliberately small — local 7B models
 //! choose poorly when given many tools. Each tool declares the `Action`s it
 //! would take so the permission gate can vet it before `run`. Current tools:
-//! read_file, write_file, edit_file, run_bash, glob_files, grep_files.
+//! read_file, write_file, edit_file, run_bash, glob_files, grep_files, web_fetch.
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -71,6 +71,7 @@ pub fn default_registry(project_dir: PathBuf) -> ToolRegistry {
                 root: project_dir.clone(),
             }),
             Box::new(GrepFiles { root: project_dir }),
+            Box::new(WebFetch),
         ],
     }
 }
@@ -410,5 +411,110 @@ impl Tool for GrepFiles {
         } else {
             Ok(truncate(results.join("\n")))
         }
+    }
+}
+
+// --- web fetch (network egress, gated by the permission policy) ---
+
+/// Column width html2text wraps to. Wide enough to avoid chopping sentences,
+/// narrow enough to stay readable.
+const FETCH_WRAP_WIDTH: usize = 100;
+
+struct WebFetch;
+
+#[async_trait]
+impl Tool for WebFetch {
+    fn name(&self) -> &str {
+        "web_fetch"
+    }
+    fn description(&self) -> &str {
+        "Fetch an http/https URL and return its main text content with HTML markup stripped. Use it to read documentation or research a topic on the web."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string", "description": "The http(s) URL to fetch." }
+            },
+            "required": ["url"]
+        })
+    }
+    fn actions(&self, args: &Value) -> Vec<Action> {
+        match args.get("url").and_then(|v| v.as_str()) {
+            Some(u) => vec![Action::Fetch(u.to_string())],
+            None => vec![],
+        }
+    }
+    async fn run(&self, args: &Value) -> Result<String> {
+        let url = get_str(args, "url")?;
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err(anyhow!("only http and https URLs are supported"));
+        }
+
+        let client = reqwest::Client::builder()
+            .user_agent("yoda/0.1 (+web_fetch)")
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .map_err(|e| anyhow!("could not build HTTP client: {e}"))?;
+
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| anyhow!("could not fetch {url}: {e}"))?
+            .error_for_status()
+            .map_err(|e| anyhow!("{url} returned an error: {e}"))?;
+
+        let is_html = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|ct| ct.contains("html"))
+            .unwrap_or(false);
+
+        let body = response
+            .text()
+            .await
+            .map_err(|e| anyhow!("could not read body of {url}: {e}"))?;
+
+        let text = if is_html {
+            html2text::from_read(body.as_bytes(), FETCH_WRAP_WIDTH)
+                .map_err(|e| anyhow!("could not parse HTML from {url}: {e}"))?
+        } else {
+            body
+        };
+
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            Ok(format!("(fetched {url} but it had no readable text)"))
+        } else {
+            Ok(truncate(format!("Source: {url}\n\n{trimmed}")))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Network-dependent; run with `cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore = "hits the network"]
+    async fn web_fetch_strips_html_to_text() {
+        let out = WebFetch
+            .run(&json!({ "url": "https://example.com" }))
+            .await
+            .unwrap();
+        assert!(out.contains("Example Domain"), "got: {out}");
+        assert!(!out.contains("<html"), "markup not stripped: {out}");
+    }
+
+    #[tokio::test]
+    async fn web_fetch_rejects_non_http_scheme() {
+        let err = WebFetch
+            .run(&json!({ "url": "file:///etc/passwd" }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("http"));
     }
 }

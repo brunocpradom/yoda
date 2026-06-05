@@ -1,9 +1,14 @@
 {
-  "_comment": "Copy to 'mcp.json' (in the project dir or ~/.yoda/) to enable MCP servers. Each server is spawned as a subprocess and its tools become available as 'name__tool'. MCP tool calls always prompt for permission.",
+  "_comment": "Copy to 'mcp.json' (in the project dir or ~/.yoda/) to enable MCP servers. Each server is spawned as a subprocess and its tools become available as 'name__tool'. MCP tool calls always prompt for permission. Each entry takes 'command', optional 'args', and optional 'env' (extra environment variables for the server process, e.g. per-server credentials).",
   "servers": {
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allow"]
+    },
+    "github": {
+      "command": "/absolute/path/to/threepio",
+      "args": ["https://api.githubcopilot.com/mcp/"],
+      "env": { "THREEPIO_CLIENT_ID": "your-oauth-client-id" }
     }
   }
 }

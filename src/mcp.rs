@@ -45,9 +45,15 @@ pub struct McpClient {
 }
 
 impl McpClient {
-    pub fn connect(name: &str, command: &str, args: &[String]) -> Result<McpClient> {
+    pub fn connect(
+        name: &str,
+        command: &str,
+        args: &[String],
+        env: &BTreeMap<String, String>,
+    ) -> Result<McpClient> {
         let mut child = Command::new(command)
             .args(args)
+            .envs(env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -249,6 +255,10 @@ struct ServerSpec {
     command: String,
     #[serde(default)]
     args: Vec<String>,
+    /// Extra environment variables for the server process (e.g. per-server
+    /// credentials). Inherited on top of Yoda's own environment.
+    #[serde(default)]
+    env: BTreeMap<String, String>,
 }
 
 /// First existing config among `<project>/mcp.json` and `~/.yoda/mcp.json`.
@@ -295,7 +305,7 @@ fn connect_and_register(
     spec: &ServerSpec,
     registry: &mut ToolRegistry,
 ) -> Result<usize> {
-    let mut client = McpClient::connect(name, &spec.command, &spec.args)?;
+    let mut client = McpClient::connect(name, &spec.command, &spec.args, &spec.env)?;
     let defs = client.list_tools()?;
     let shared = Arc::new(Mutex::new(client));
     let count = defs.len();

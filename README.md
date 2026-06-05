@@ -52,7 +52,8 @@ access outside it, and non-allowlisted shell commands, prompt for permission.
 ## Tools
 
 `read_file`, `write_file`, `edit_file`, `run_bash`, `glob_files`, `grep_files`,
-plus any tools provided by configured MCP servers.
+`web_fetch` (fetch an http/https URL and return its text with HTML stripped —
+prompts before the request), plus any tools provided by configured MCP servers.
 
 ## Skills
 
@@ -63,6 +64,9 @@ the body is injected when you run `/skill <name>`. See `skills.example/`.
 
 Copy `mcp.json.example` to `mcp.json` (project dir or `~/.yoda/`) to connect MCP
 servers. Their tools appear as `server__tool` and always prompt before running.
+Each server entry takes `command`, optional `args`, and optional `env` (extra
+environment variables for the server process — handy for per-server credentials,
+e.g. when bridging remote OAuth servers with [threepio](../threepio)).
 
 ## Develop
 

@@ -16,6 +16,8 @@ pub enum Action {
     Read(PathBuf),
     Write(PathBuf),
     Run(String),
+    /// An outbound HTTP(S) request to a URL (network egress).
+    Fetch(String),
     /// An opaque call to an external MCP tool, whose effects we can't classify.
     External {
         server: String,
@@ -29,6 +31,7 @@ impl Action {
             Action::Read(p) => format!("read {}", p.display()),
             Action::Write(p) => format!("write {}", p.display()),
             Action::Run(c) => format!("run `{c}`"),
+            Action::Fetch(url) => format!("fetch {url}"),
             Action::External { server, tool } => format!("call MCP tool {server}/{tool}"),
         }
     }
@@ -72,6 +75,8 @@ impl Policy {
                     Decision::Ask
                 }
             }
+            // Network egress: show the user the URL and ask before fetching.
+            Action::Fetch(_) => Decision::Ask,
             // External (MCP) tools can do anything; always ask before running.
             Action::External { .. } => Decision::Ask,
         }
@@ -209,6 +214,15 @@ mod tests {
             tool: "read".into(),
         };
         assert_eq!(p.check(&action), Decision::Ask);
+    }
+
+    #[test]
+    fn web_fetch_asks() {
+        let p = policy();
+        assert_eq!(
+            p.check(&Action::Fetch("https://example.com".into())),
+            Decision::Ask
+        );
     }
 
     #[test]
