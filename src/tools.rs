@@ -1,6 +1,7 @@
-//! The tool set the agent can call. Kept deliberately small (4 tools) — local
-//! 7B models choose poorly when given many tools. Each tool declares the
-//! `Action`s it would take so the permission gate can vet it before `run`.
+//! The tool set the agent can call. Kept deliberately small — local 7B models
+//! choose poorly when given many tools. Each tool declares the `Action`s it
+//! would take so the permission gate can vet it before `run`. Current tools:
+//! read_file, write_file, edit_file, run_bash, glob_files, grep_files.
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -54,13 +55,17 @@ impl ToolRegistry {
     }
 }
 
-pub fn default_registry() -> ToolRegistry {
+pub fn default_registry(project_dir: PathBuf) -> ToolRegistry {
     ToolRegistry {
         tools: vec![
             Box::new(ReadFile),
             Box::new(WriteFile),
             Box::new(EditFile),
             Box::new(RunBash),
+            Box::new(GlobFiles {
+                root: project_dir.clone(),
+            }),
+            Box::new(GrepFiles { root: project_dir }),
         ],
     }
 }
@@ -243,5 +248,162 @@ impl Tool for RunBash {
         }
         let code = output.status.code().unwrap_or(-1);
         Ok(truncate(format!("(exit {code})\n{}", out.trim_end())))
+    }
+}
+
+// --- search tools (read-only, scoped to the project directory) ---
+
+const MAX_MATCHES: usize = 200;
+const MAX_GREP_FILE_BYTES: u64 = 1_000_000;
+
+/// True if any path component is a directory we never want to search.
+fn is_ignored(p: &Path) -> bool {
+    p.components().any(|c| {
+        matches!(
+            c.as_os_str().to_str(),
+            Some(".git") | Some("target") | Some("node_modules")
+        )
+    })
+}
+
+/// Expand a glob pattern under `root` (relative patterns are anchored to it),
+/// keeping only results inside `root` and outside ignored directories.
+fn glob_in_root(root: &Path, pattern: &str) -> Vec<PathBuf> {
+    let full = if Path::new(pattern).is_absolute() {
+        pattern.to_string()
+    } else {
+        format!("{}/{}", root.display(), pattern)
+    };
+    let Ok(paths) = glob::glob(&full) else {
+        return vec![];
+    };
+    paths
+        .flatten()
+        .filter(|p| p.starts_with(root) && !is_ignored(p))
+        .collect()
+}
+
+struct GlobFiles {
+    root: PathBuf,
+}
+
+#[async_trait]
+impl Tool for GlobFiles {
+    fn name(&self) -> &str {
+        "glob_files"
+    }
+    fn description(&self) -> &str {
+        "List files in the project matching a glob pattern (e.g. 'src/**/*.rs'). Read-only."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "Glob pattern, e.g. '**/*.rs'." }
+            },
+            "required": ["pattern"]
+        })
+    }
+    fn actions(&self, _args: &Value) -> Vec<Action> {
+        vec![] // listing filenames inside the project is safe
+    }
+    async fn run(&self, args: &Value) -> Result<String> {
+        let pattern = get_str(args, "pattern")?;
+        let mut files: Vec<String> = glob_in_root(&self.root, &pattern)
+            .into_iter()
+            .filter(|p| p.is_file())
+            .map(|p| {
+                p.strip_prefix(&self.root)
+                    .unwrap_or(&p)
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        files.sort();
+        files.truncate(MAX_MATCHES);
+        if files.is_empty() {
+            Ok(format!("No files match '{pattern}'."))
+        } else {
+            Ok(truncate(files.join("\n")))
+        }
+    }
+}
+
+struct GrepFiles {
+    root: PathBuf,
+}
+
+#[async_trait]
+impl Tool for GrepFiles {
+    fn name(&self) -> &str {
+        "grep_files"
+    }
+    fn description(&self) -> &str {
+        "Search project file contents for a literal substring. Returns 'path:line: text' matches. Read-only."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Literal text to search for." },
+                "path_glob": { "type": "string", "description": "Optional glob to limit files, default '**/*'." },
+                "ignore_case": { "type": "boolean", "description": "Case-insensitive match, default false." }
+            },
+            "required": ["query"]
+        })
+    }
+    fn actions(&self, _args: &Value) -> Vec<Action> {
+        vec![] // reads are confined to the project directory, already auto-allowed
+    }
+    async fn run(&self, args: &Value) -> Result<String> {
+        let query = get_str(args, "query")?;
+        let ignore_case = args
+            .get("ignore_case")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let path_glob = args
+            .get("path_glob")
+            .and_then(|v| v.as_str())
+            .unwrap_or("**/*");
+
+        let needle = if ignore_case {
+            query.to_lowercase()
+        } else {
+            query.clone()
+        };
+
+        let mut results = Vec::new();
+        'files: for file in glob_in_root(&self.root, path_glob) {
+            if !file.is_file() {
+                continue;
+            }
+            if file.metadata().map(|m| m.len()).unwrap_or(0) > MAX_GREP_FILE_BYTES {
+                continue;
+            }
+            // read_to_string fails on non-UTF-8 (binary) files — we skip those.
+            let Ok(content) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            let rel = file.strip_prefix(&self.root).unwrap_or(&file);
+            for (n, line) in content.lines().enumerate() {
+                let hay = if ignore_case {
+                    line.to_lowercase()
+                } else {
+                    line.to_string()
+                };
+                if hay.contains(&needle) {
+                    results.push(format!("{}:{}: {}", rel.display(), n + 1, line.trim()));
+                    if results.len() >= MAX_MATCHES {
+                        break 'files;
+                    }
+                }
+            }
+        }
+
+        if results.is_empty() {
+            Ok(format!("No matches for '{query}'."))
+        } else {
+            Ok(truncate(results.join("\n")))
+        }
     }
 }

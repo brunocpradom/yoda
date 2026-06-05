@@ -196,7 +196,21 @@ change inference memory/CPU cost — model weights dominate either way. Decision
   loop (`src/agent.rs`), 4 tools (`src/tools.rs`: read/write/edit/bash), allowlist permission
   gate with catastrophic denylist (`src/permission.rs`, 4 unit tests passing). Verified live:
   file create+read via the agent, out-of-project write correctly prompted & denied.
-- Phases 3–5: not started.
+- **Phase 3 — DONE & tested 2026-06-05.** Two read-only search tools (`glob_files`,
+  `grep_files`, project-scoped, skip `.git`/`target`/`node_modules`) in `src/tools.rs`;
+  session save/load/list (`src/session.rs`, `~/.yoda/sessions/*.json`) with `/save /load
+  /sessions /reset /help` slash-commands in `src/main.rs`. 5 unit tests passing.
+  Verified live: grep located a symbol's file+line; session round-trip via slash-commands.
+- Phases 4–5: not started.
+
+### Phase 3 decision: streaming deferred (deliberate, simpler-is-better)
+
+Token streaming of the final answer was **not** restored. Reason: it conflicts with the
+text-fallback tool-call parser — models like `qwen2.5-coder` emit tool calls as message
+*content*, so live-streaming content would print raw tool-call JSON before the harness can
+recognize and suppress it. The agent already shows progress during the slow part (the `🔧`/`✓`
+tool activity), so the responsiveness gap is small. Streaming can be revisited later, gated to
+models that emit native `tool_calls` (where content and tool calls are separate channels).
 
 ### Phase 2 finding: local tool-calling reliability (important)
 
