@@ -91,7 +91,10 @@ impl Policy {
         } else {
             self.project_dir.join(p)
         };
-        normalize(&base).starts_with(&self.project_dir)
+        // Collapse `..`/`.` lexically, THEN resolve symlinks: an in-project
+        // symlink pointing outside must not let access slip past this boundary.
+        let resolved = resolve_symlinks(&normalize(&base));
+        resolved.starts_with(&self.project_dir)
     }
 
     fn command_allowed(&self, cmd: &str) -> bool {
@@ -132,6 +135,32 @@ fn is_catastrophic(cmd: &str) -> bool {
     PATTERNS.iter().any(|p| c.contains(&p.replace(' ', "")))
 }
 
+/// Resolve symlinks as far as the path exists: canonicalize the deepest
+/// existing ancestor (resolving any symlinked directories) and re-append the
+/// not-yet-existing tail. This detects a symlink escaping the project even for a
+/// target file that doesn't exist yet (e.g. a write). Input is assumed lexically
+/// normalized (no `..`/`.`), so the walked-off tail components are plain names.
+fn resolve_symlinks(p: &Path) -> PathBuf {
+    if let Ok(canonical) = p.canonicalize() {
+        return canonical;
+    }
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = p.to_path_buf();
+    while let Some(parent) = cur.parent().map(Path::to_path_buf) {
+        if let Some(name) = cur.file_name() {
+            tail.push(name.to_os_string());
+        }
+        if let Ok(mut resolved) = parent.canonicalize() {
+            while let Some(name) = tail.pop() {
+                resolved.push(name);
+            }
+            return resolved;
+        }
+        cur = parent;
+    }
+    p.to_path_buf()
+}
+
 /// Collapse `.` and `..` components without touching the filesystem.
 fn normalize(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
@@ -161,9 +190,19 @@ mod tests {
         )
     }
 
+    /// A real, canonicalized temp directory to stand in for the project dir
+    /// (the check now resolves symlinks, so the dir must actually exist — which
+    /// it always does in production, where project_dir is canonicalized).
+    fn real_project(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("yoda_pol_{tag}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.canonicalize().unwrap()
+    }
+
     #[test]
     fn reads_and_writes_inside_project_are_allowed() {
-        let p = policy();
+        let dir = real_project("in");
+        let p = Policy::new(dir.clone(), vec![]);
         assert_eq!(
             p.check(&Action::Read("src/main.rs".into())),
             Decision::Allow
@@ -172,21 +211,21 @@ mod tests {
             p.check(&Action::Write("src/new.rs".into())),
             Decision::Allow
         );
-        assert_eq!(
-            p.check(&Action::Write("/home/me/project/a/b.txt".into())),
-            Decision::Allow
-        );
+        assert_eq!(p.check(&Action::Write(dir.join("a/b.txt"))), Decision::Allow);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn access_outside_project_asks() {
-        let p = policy();
+        let dir = real_project("out");
+        let p = Policy::new(dir.clone(), vec![]);
         assert_eq!(p.check(&Action::Write("/etc/passwd".into())), Decision::Ask);
         // path traversal escaping the project must not be auto-allowed
         assert_eq!(
             p.check(&Action::Write("../../etc/passwd".into())),
             Decision::Ask
         );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -223,6 +262,34 @@ mod tests {
             p.check(&Action::Fetch("https://example.com".into())),
             Decision::Ask
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn symlink_escaping_project_is_not_auto_allowed() {
+        use std::os::unix::fs::symlink;
+        let tmp = std::env::temp_dir().join(format!("yoda_perm_{}", std::process::id()));
+        let project = tmp.join("project");
+        let outside = tmp.join("outside");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = project.join("escape");
+        let _ = std::fs::remove_file(&link);
+        symlink(&outside, &link).unwrap();
+
+        let canonical_project = project.canonicalize().unwrap();
+        let p = Policy::new(canonical_project.clone(), vec![]);
+        // Reading through the symlink resolves outside the project → must ask.
+        assert_eq!(
+            p.check(&Action::Read(link.join("secret.txt"))),
+            Decision::Ask
+        );
+        // A genuine in-project path is still auto-allowed.
+        assert_eq!(
+            p.check(&Action::Write(canonical_project.join("ok.txt"))),
+            Decision::Allow
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

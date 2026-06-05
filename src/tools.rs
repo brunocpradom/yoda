@@ -6,6 +6,7 @@
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 
 use crate::permission::Action;
@@ -113,6 +114,63 @@ fn normalize_url(input: &str) -> Result<String> {
         Err(anyhow!("only http and https URLs are supported"))
     } else {
         Ok(format!("https://{u}"))
+    }
+}
+
+/// SSRF guard for `web_fetch`: refuse loopback/link-local/private targets
+/// (e.g. `localhost`, `127.0.0.1`, cloud metadata `169.254.169.254`, `10/8`).
+/// Set `YODA_ALLOW_LOCAL_FETCH=1` to permit them (e.g. a local dev server).
+fn guard_fetch_target(u: &reqwest::Url) -> Result<()> {
+    if std::env::var_os("YODA_ALLOW_LOCAL_FETCH").is_some() {
+        return Ok(());
+    }
+    let host = u.host_str().ok_or_else(|| anyhow!("URL has no host"))?;
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err(anyhow!(
+            "refusing to fetch localhost (set YODA_ALLOW_LOCAL_FETCH=1 to allow)"
+        ));
+    }
+    let port = u.port_or_known_default().unwrap_or(80);
+    let mut resolved_any = false;
+    for addr in (host, port)
+        .to_socket_addrs()
+        .map_err(|e| anyhow!("could not resolve host '{host}': {e}"))?
+    {
+        resolved_any = true;
+        if is_blocked_ip(addr.ip()) {
+            return Err(anyhow!(
+                "refusing to fetch a private/loopback/link-local address ({}); set YODA_ALLOW_LOCAL_FETCH=1 to override",
+                addr.ip()
+            ));
+        }
+    }
+    if !resolved_any {
+        return Err(anyhow!("could not resolve host '{host}'"));
+    }
+    Ok(())
+}
+
+fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.octets()[0] == 0
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
+                || v6
+                    .to_ipv4_mapped()
+                    .map(|m| m.is_loopback() || m.is_private() || m.is_link_local())
+                    .unwrap_or(false)
+        }
     }
 }
 
@@ -466,15 +524,26 @@ impl Tool for WebFetch {
     }
     async fn run(&self, args: &Value) -> Result<String> {
         let url = normalize_url(&get_str(args, "url")?)?;
+        let parsed = reqwest::Url::parse(&url).map_err(|e| anyhow!("invalid URL: {e}"))?;
+        guard_fetch_target(&parsed)?;
 
         let client = reqwest::Client::builder()
             .user_agent("yoda/0.1 (+web_fetch)")
             .timeout(std::time::Duration::from_secs(20))
+            // Re-check every redirect hop so a public URL can't bounce us to an
+            // internal address (SSRF via redirect).
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 10 || guard_fetch_target(attempt.url()).is_err() {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
             .build()
             .map_err(|e| anyhow!("could not build HTTP client: {e}"))?;
 
         let response = client
-            .get(&url)
+            .get(parsed)
             .send()
             .await
             .map_err(|e| anyhow!("could not fetch {url}: {e}"))?
@@ -547,6 +616,20 @@ mod tests {
             .unwrap();
         assert!(out.contains("Example Domain"), "got: {out}");
         assert!(!out.contains("<html"), "markup not stripped: {out}");
+    }
+
+    #[test]
+    fn web_fetch_blocks_private_and_loopback_targets() {
+        let blocked = |u: &str| guard_fetch_target(&reqwest::Url::parse(u).unwrap()).is_err();
+        assert!(blocked("http://127.0.0.1/"));
+        assert!(blocked("http://169.254.169.254/latest/meta-data/")); // cloud metadata
+        assert!(blocked("http://10.0.0.5/"));
+        assert!(blocked("http://192.168.1.1/"));
+        assert!(blocked("http://172.16.9.9/"));
+        assert!(blocked("http://localhost/"));
+        assert!(blocked("http://[::1]/"));
+        // A public IP literal is allowed (resolves without DNS, not in a blocked range).
+        assert!(!blocked("http://93.184.216.34/"));
     }
 
     #[tokio::test]

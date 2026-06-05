@@ -30,8 +30,22 @@ impl Config {
             model: std::env::var("YODA_MODEL").unwrap_or_else(|_| "qwen2.5-coder:7b".into()),
             system_prompt: SYSTEM_PROMPT.into(),
             project_dir,
-            allowed_commands: default_commands(),
+            allowed_commands: load_allowed_commands(),
         })
+    }
+}
+
+/// The commands `run_bash` may execute without prompting. Overridable with
+/// `YODA_ALLOWED_COMMANDS` (comma-separated) for users who knowingly want to
+/// auto-allow more (e.g. `git,cargo`).
+fn load_allowed_commands() -> Vec<String> {
+    match std::env::var("YODA_ALLOWED_COMMANDS") {
+        Ok(v) => v
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        Err(_) => default_commands(),
     }
 }
 
@@ -45,12 +59,35 @@ relative to the project directory. Read a file before editing it. Use tools only
 help; otherwise answer directly. When the task is done, reply with a short final message and \
 no tool call. Be brief.";
 
+/// Default auto-allow set: only commands that neither execute arbitrary code
+/// nor dump arbitrary file contents to the model. Notably EXCLUDED (so they
+/// prompt): `cat`/`head`/`tail`/`grep`/`rg`/`wc` (could read any file, bypassing
+/// the project-scoped read gate) and `find`/`git`/`cargo`/`rustc` (can execute
+/// arbitrary code — e.g. `find -exec`, git hooks, cargo build scripts). For
+/// in-project reading the model has the path-scoped read_file/grep_files tools.
 fn default_commands() -> Vec<String> {
     [
-        "ls", "pwd", "echo", "cat", "head", "tail", "wc", "grep", "rg", "find", "tree", "file",
-        "which", "date", "whoami", "git", "cargo", "rustc",
+        "ls", "pwd", "echo", "tree", "file", "which", "date", "whoami",
     ]
     .iter()
     .map(|s| s.to_string())
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_auto_allow_excludes_dangerous_commands() {
+        let cmds = default_commands();
+        for dangerous in [
+            "find", "git", "cargo", "rustc", "cat", "grep", "rg", "head", "tail",
+        ] {
+            assert!(
+                !cmds.iter().any(|c| c == dangerous),
+                "{dangerous} must not be auto-allowed"
+            );
+        }
+    }
 }

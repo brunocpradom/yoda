@@ -37,6 +37,8 @@ Configuration via environment variables:
 |-----|---------|---------|
 | `YODA_MODEL` | `qwen2.5-coder:7b` | Ollama model to use |
 | `YODA_BASE_URL` | `http://localhost:11434` | OpenAI-compatible endpoint |
+| `YODA_ALLOWED_COMMANDS` | safe read-only set | comma-separated programs `run_bash` may run without asking (the default excludes code-executors like `cargo`/`git`/`find` and file-dumpers like `cat`/`grep` — those prompt) |
+| `YODA_ALLOW_LOCAL_FETCH` | unset | set to `1` to let `web_fetch` reach `localhost`/private/loopback addresses (off by default to block SSRF) |
 
 The working directory is the "project" — file access inside it is auto-allowed;
 access outside it, and non-allowlisted shell commands, prompt for permission.
