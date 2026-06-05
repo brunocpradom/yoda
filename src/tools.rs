@@ -684,8 +684,12 @@ impl Tool for WebSearch {
             ));
         }
         let mut out = format!("Search results for '{query}':\n");
-        for (i, (title, link)) in results.iter().enumerate() {
+        for (i, (title, link, snippet)) in results.iter().enumerate() {
             out.push_str(&format!("{}. {title} — {link}\n", i + 1));
+            if !snippet.is_empty() {
+                let s: String = snippet.chars().take(220).collect();
+                out.push_str(&format!("   {s}\n"));
+            }
         }
         Ok(truncate(out))
     }
@@ -702,7 +706,7 @@ fn ddg_url(query: &str) -> Result<reqwest::Url> {
 /// Extract `(title, url)` pairs from a DuckDuckGo HTML results page. Best-effort
 /// scraping: DuckDuckGo wraps each result link in a `result__a` anchor whose
 /// `href` is a `/l/?uddg=<real-url>` redirect.
-fn parse_ddg(html: &str) -> Vec<(String, String)> {
+fn parse_ddg(html: &str) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     for seg in html.split("class=\"result__a\"").skip(1) {
         let Some(href) = slice_between(seg, "href=\"", "\"") else {
@@ -711,10 +715,16 @@ fn parse_ddg(html: &str) -> Vec<(String, String)> {
         let title = slice_between(seg, ">", "</a>")
             .map(|t| decode_entities(&strip_tags(&t)))
             .unwrap_or_default();
+        // The snippet follows the title anchor, in the same result block.
+        let snippet = seg
+            .split_once("result__snippet")
+            .and_then(|(_, after)| slice_between(after, ">", "</a>"))
+            .map(|t| decode_entities(&strip_tags(&t)))
+            .unwrap_or_default();
         if let Some(link) = decode_ddg_redirect(&href)
             && !title.is_empty()
         {
-            out.push((title, link));
+            out.push((title, link, snippet));
         }
         if out.len() >= SEARCH_RESULTS {
             break;
@@ -828,12 +838,14 @@ mod tests {
     fn parses_duckduckgo_results() {
         let html = concat!(
             r#"<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa&amp;rut=x">Example &amp; <b>A</b></a>"#,
+            r#"<a class="result__snippet" href="x">A <b>snippet</b> about example.</a>"#,
             r#" junk <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rust-lang.org%2F">Rust</a>"#,
         );
         let r = parse_ddg(html);
         assert_eq!(r.len(), 2);
         assert_eq!(r[0].0, "Example & A");
         assert_eq!(r[0].1, "https://example.com/a");
+        assert_eq!(r[0].2, "A snippet about example.");
         assert_eq!(r[1].1, "https://www.rust-lang.org/");
     }
 
