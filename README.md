@@ -16,6 +16,15 @@ the architecture and rationale.
 cargo run
 ```
 
+Or, to launch against **any** directory (builds a release binary on first run):
+
+```sh
+~/code/yoda_harness/run.sh
+```
+
+For a global `yoda` command, symlink it onto your PATH (e.g. `ln -s
+~/code/yoda_harness/run.sh ~/.local/bin/yoda`), then run `yoda` from anywhere.
+
 Configuration via environment variables:
 
 | Var | Default | Meaning |
