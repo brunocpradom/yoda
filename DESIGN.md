@@ -207,7 +207,23 @@ change inference memory/CPU cost — model weights dominate either way. Decision
   `name__tool` and added to the registry; calls gated via `Action::External` (always Ask).
   Config: `mcp.json` in project or `~/.yoda/` (see `mcp.json.example`). 9 unit tests passing.
   Verified live against a local mock MCP server: connect/list/call round-trip + permission gate.
-- Phase 5: not started.
+- **Phase 5 — DONE & tested 2026-06-05.** Skills (`src/skill.rs`): markdown files in
+  `~/.yoda/skills/*.md` with optional `description:` frontmatter, activated on demand via
+  `/skill <name>` (manual, to protect a 7B model's context). Runtime model switching via
+  `/model [name]` (`OllamaProvider::set_model`). README + `skills.example/`. 12 unit tests.
+  Verified live: skill listing/activation and model switch.
+
+  **Routing decision (simpler-is-better):** automatic multi-model routing is intentionally
+  NOT built. On 16 GB only one model is resident at a time, so the honest options are
+  (a) the multi-role agent loop (already present) and (b) manual `/model` switching (built).
+  Automatic routing becomes worthwhile at 64–128 GB (see §5b) and can be added behind the
+  existing `Provider` abstraction then.
+
+## 9. Status summary
+
+All five planned phases are implemented, tested (`cargo test`: 12 unit tests + live checks),
+formatted, and clippy-clean. The harness is a usable local coding agent: streaming-free but
+responsive tool loop, allowlist permissions, search, sessions, MCP, skills, model switching.
 
 ### Phase 3 decision: streaming deferred (deliberate, simpler-is-better)
 

@@ -22,6 +22,15 @@ impl OllamaProvider {
             model: model.into(),
         }
     }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Switch the active model at runtime (manual routing — see DESIGN.md §5b).
+    pub fn set_model(&mut self, model: impl Into<String>) {
+        self.model = model.into();
+    }
 }
 
 #[derive(Deserialize)]
