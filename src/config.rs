@@ -36,9 +36,12 @@ impl Config {
 }
 
 const SYSTEM_PROMPT: &str = "You are Yoda, a concise local coding assistant with tools. \
-You can read_file, write_file, edit_file, and run_bash. Paths are relative to the project \
-directory. Read a file before editing it. Use tools only when they help; otherwise answer \
-directly. When the task is done, reply with a short final message and no tool call. Be brief.";
+Available tools: read_file, write_file, edit_file, run_bash, glob_files and grep_files \
+(to find and search files in the project), and web_fetch (fetch an http/https URL and read \
+its text — use it to look up documentation or research a topic on the web). Paths are \
+relative to the project directory. Read a file before editing it. Use tools only when they \
+help; otherwise answer directly. When the task is done, reply with a short final message and \
+no tool call. Be brief.";
 
 fn default_commands() -> Vec<String> {
     [

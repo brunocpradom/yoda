@@ -60,13 +60,65 @@ prompts before the request), plus any tools provided by configured MCP servers.
 Drop `*.md` files in `~/.yoda/skills/`. Optional frontmatter sets a description;
 the body is injected when you run `/skill <name>`. See `skills.example/`.
 
-## MCP
+## MCP & threepio
 
-Copy `mcp.json.example` to `mcp.json` (project dir or `~/.yoda/`) to connect MCP
-servers. Their tools appear as `server__tool` and always prompt before running.
-Each server entry takes `command`, optional `args`, and optional `env` (extra
-environment variables for the server process — handy for per-server credentials,
-e.g. when bridging remote OAuth servers with [threepio](../threepio)).
+[MCP](https://modelcontextprotocol.io) (Model Context Protocol) lets Yoda use
+tools provided by external servers — GitHub, Gmail, a filesystem sandbox, and so
+on. Copy `mcp.json.example` to `mcp.json` (in the project dir or `~/.yoda/`) to
+configure them. Each connected server's tools appear to the model as
+`server__tool` and **always prompt before running**.
+
+Each server entry takes:
+
+| Field | Required | Meaning |
+|-------|----------|---------|
+| `command` | yes | Executable to spawn |
+| `args` | no | Arguments passed to it |
+| `env` | no | Extra environment variables for the process (e.g. per-server credentials) |
+
+### Local (stdio) servers
+
+Yoda speaks the MCP **stdio** transport: it spawns the server as a subprocess and
+exchanges JSON-RPC over its stdin/stdout. Any stdio MCP server works directly:
+
+```json
+{ "servers": { "filesystem": {
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allow"]
+} } }
+```
+
+### Remote (HTTP + OAuth) servers via threepio
+
+Yoda itself only speaks stdio — it does **not** do HTTP or OAuth. To reach remote,
+OAuth-protected MCP servers (GitHub, Google Gmail, etc.), it uses
+[**threepio**](../threepio), a companion pure-Rust bridge. Yoda spawns threepio
+like any stdio server; threepio handles the Streamable HTTP transport and the
+full OAuth 2.1 + PKCE browser flow, caching tokens so you rarely re-authorize.
+
+```json
+{ "servers": {
+    "github": {
+      "command": "/abs/path/to/threepio",
+      "args": ["https://api.githubcopilot.com/mcp/"],
+      "env": { "THREEPIO_CLIENT_ID": "your-github-oauth-app-client-id" }
+    },
+    "gmail": {
+      "command": "/abs/path/to/threepio",
+      "args": ["https://gmailmcp.googleapis.com/mcp/v1"],
+      "env": {
+        "THREEPIO_CLIENT_ID": "your-google-oauth-client-id",
+        "THREEPIO_CLIENT_SECRET": "your-google-oauth-client-secret"
+      }
+    }
+} }
+```
+
+Setup (per server): create an OAuth client with callback
+`http://localhost:33418/callback`, fill the `env` credentials, run
+`threepio <url> --login` once to cache a token, then start Yoda. See
+[threepio's README](../threepio/README.md) for the details and the reasoning
+behind the pre-login step.
 
 ## Develop
 
