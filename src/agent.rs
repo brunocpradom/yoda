@@ -1,0 +1,217 @@
+//! The agentic loop. Given the conversation so far, ask the model what to do;
+//! if it requests tools, vet each through the permission gate, run the allowed
+//! ones, feed the results back, and repeat until the model produces a final
+//! text answer (or we hit the step cap that stops runaway local-model loops).
+
+use std::io::{self, Write};
+
+use anyhow::Result;
+use serde_json::{Value, json};
+
+use crate::permission::{Action, Decision, Policy};
+use crate::provider::{FunctionCall, Message, Provider, ToolCall};
+use crate::tools::ToolRegistry;
+
+/// Upper bound on tool round-trips per user turn. Small models sometimes loop;
+/// this guarantees the turn terminates.
+const MAX_STEPS: usize = 8;
+
+pub async fn run_turn(
+    provider: &dyn Provider,
+    tools: &ToolRegistry,
+    policy: &Policy,
+    history: &mut Vec<Message>,
+) -> Result<()> {
+    let specs = tools.specs();
+
+    for step in 0..MAX_STEPS {
+        let mut completion = match provider.complete(history, &specs).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[error: {e:#}]");
+                return Ok(());
+            }
+        };
+
+        // Fallback for models that print tool calls as text instead of using
+        // the structured `tool_calls` field (e.g. qwen2.5-coder). If the reply
+        // has no native tool calls but its text contains tool-call JSON for a
+        // known tool, treat that as the tool call and don't echo the raw JSON.
+        if completion.tool_calls.is_empty() {
+            if let Some(text) = &completion.content {
+                let recovered = extract_tool_calls(text, tools);
+                if !recovered.is_empty() {
+                    completion.tool_calls = recovered;
+                    completion.content = None;
+                }
+            }
+        }
+
+        // Some models omit tool-call ids; synthesize stable ones so the tool
+        // result messages can reference them.
+        for (i, call) in completion.tool_calls.iter_mut().enumerate() {
+            if call.id.is_empty() {
+                call.id = format!("call_{step}_{i}");
+            }
+        }
+
+        if let Some(text) = &completion.content {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                println!("yoda ▸ {trimmed}\n");
+            }
+        }
+
+        history.push(Message::assistant(completion.content.clone(), completion.tool_calls.clone()));
+
+        if completion.tool_calls.is_empty() {
+            return Ok(()); // model gave a final answer
+        }
+
+        for call in &completion.tool_calls {
+            let result = execute_call(tools, policy, call).await;
+            history.push(Message::tool_result(call.id.clone(), result));
+        }
+    }
+
+    println!("yoda ▸ [stopped after {MAX_STEPS} tool steps]\n");
+    Ok(())
+}
+
+/// Run one tool call after vetting it. Returns the text fed back to the model —
+/// including error/denied strings, so the model can recover rather than crash.
+async fn execute_call(tools: &ToolRegistry, policy: &Policy, call: &ToolCall) -> String {
+    let name = &call.function.name;
+    let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+
+    let Some(tool) = tools.get(name) else {
+        println!("  🔧 {name} — unknown tool");
+        return format!("Error: unknown tool '{name}'");
+    };
+
+    println!("  🔧 {name}({})", compact(&args));
+
+    for action in tool.actions(&args) {
+        match policy.check(&action) {
+            Decision::Allow => {}
+            Decision::Deny => {
+                println!("  ⛔ denied by policy: {}", action.describe());
+                return format!("Permission denied by policy: {}", action.describe());
+            }
+            Decision::Ask => {
+                if !ask_user(&action) {
+                    println!("  ⛔ you denied: {}", action.describe());
+                    return format!("User denied permission: {}", action.describe());
+                }
+            }
+        }
+    }
+
+    match tool.run(&args).await {
+        Ok(output) => {
+            println!("  ✓ done\n");
+            output
+        }
+        Err(e) => {
+            println!("  ✗ {e}\n");
+            format!("Error running {name}: {e}")
+        }
+    }
+}
+
+/// Recover tool calls that a model emitted as plain text. Only objects whose
+/// `name` matches a registered tool are accepted, so ordinary JSON answers
+/// aren't mistaken for tool calls.
+fn extract_tool_calls(text: &str, tools: &ToolRegistry) -> Vec<ToolCall> {
+    let known = tools.names();
+    let mut calls = Vec::new();
+    for obj in scan_json_objects(text) {
+        let Some(name) = obj.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if !known.contains(&name) {
+            continue;
+        }
+        let args = obj
+            .get("arguments")
+            .or_else(|| obj.get("parameters"))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let arguments = match args {
+            Value::String(s) => s,
+            other => other.to_string(),
+        };
+        calls.push(ToolCall {
+            id: String::new(),
+            kind: "function".into(),
+            function: FunctionCall { name: name.to_string(), arguments },
+        });
+    }
+    calls
+}
+
+/// Extract every balanced top-level `{...}` JSON object from arbitrary text
+/// (ignoring code fences, `<tool_call>` tags, and surrounding prose).
+fn scan_json_objects(text: &str) -> Vec<Value> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => {
+                if depth == 0 {
+                    start = i;
+                }
+                depth += 1;
+            }
+            b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Ok(value) = serde_json::from_str::<Value>(&text[start..=i]) {
+                        if value.is_object() {
+                            out.push(value);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn ask_user(action: &Action) -> bool {
+    print!("  ⚠ allow {}? [y/N] ", action.describe());
+    io::stdout().flush().ok();
+    let mut line = String::new();
+    if io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
+/// A short one-line rendering of tool arguments for display.
+fn compact(args: &Value) -> String {
+    let s = args.to_string();
+    if s.chars().count() <= 120 {
+        s
+    } else {
+        let head: String = s.chars().take(117).collect();
+        format!("{head}...")
+    }
+}
