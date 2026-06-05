@@ -3,6 +3,7 @@
 
 mod agent;
 mod config;
+mod mcp;
 mod permission;
 mod provider;
 mod session;
@@ -20,15 +21,19 @@ use provider::{Message, OllamaProvider};
 async fn main() -> Result<()> {
     let cfg = Config::load()?;
     let provider = OllamaProvider::new(&cfg.base_url, &cfg.model);
-    let tools = tools::default_registry(cfg.project_dir.clone());
+    let mut tools = tools::default_registry(cfg.project_dir.clone());
+    let mcp_servers = mcp::setup(&cfg.project_dir, &mut tools);
     let policy = Policy::new(cfg.project_dir.clone(), cfg.allowed_commands.clone());
     let sessions_dir = session::sessions_dir();
 
-    println!("Yoda — local agent harness (Phase 3: tools + sessions)");
+    println!("Yoda — local agent harness (Phase 4: tools + sessions + MCP)");
     println!("  model:    {}", cfg.model);
     println!("  endpoint: {}", cfg.base_url);
     println!("  project:  {}", cfg.project_dir.display());
     println!("  tools:    {}", tools.names().join(", "));
+    if !mcp_servers.is_empty() {
+        println!("  mcp:      {}", mcp_servers.join(", "));
+    }
     println!("Type a message, /help for commands, or /quit to exit.\n");
 
     let mut history = vec![Message::system(&cfg.system_prompt)];

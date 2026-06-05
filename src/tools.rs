@@ -53,6 +53,11 @@ impl ToolRegistry {
     pub fn names(&self) -> Vec<&str> {
         self.tools.iter().map(|t| t.name()).collect()
     }
+
+    /// Add a tool at runtime (used to register MCP-provided tools).
+    pub fn push(&mut self, tool: Box<dyn Tool>) {
+        self.tools.push(tool);
+    }
 }
 
 pub fn default_registry(project_dir: PathBuf) -> ToolRegistry {

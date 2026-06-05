@@ -16,6 +16,11 @@ pub enum Action {
     Read(PathBuf),
     Write(PathBuf),
     Run(String),
+    /// An opaque call to an external MCP tool, whose effects we can't classify.
+    External {
+        server: String,
+        tool: String,
+    },
 }
 
 impl Action {
@@ -24,6 +29,7 @@ impl Action {
             Action::Read(p) => format!("read {}", p.display()),
             Action::Write(p) => format!("write {}", p.display()),
             Action::Run(c) => format!("run `{c}`"),
+            Action::External { server, tool } => format!("call MCP tool {server}/{tool}"),
         }
     }
 }
@@ -66,6 +72,8 @@ impl Policy {
                     Decision::Ask
                 }
             }
+            // External (MCP) tools can do anything; always ask before running.
+            Action::External { .. } => Decision::Ask,
         }
     }
 
@@ -191,6 +199,16 @@ mod tests {
         assert_eq!(p.check(&Action::Run("ls && curl x".into())), Decision::Ask);
         // and if the chained tail is catastrophic, it's denied outright (stronger)
         assert_eq!(p.check(&Action::Run("ls; rm -rf ~".into())), Decision::Deny);
+    }
+
+    #[test]
+    fn external_mcp_calls_always_ask() {
+        let p = policy();
+        let action = Action::External {
+            server: "fs".into(),
+            tool: "read".into(),
+        };
+        assert_eq!(p.check(&action), Decision::Ask);
     }
 
     #[test]

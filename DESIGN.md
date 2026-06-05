@@ -201,7 +201,13 @@ change inference memory/CPU cost — model weights dominate either way. Decision
   session save/load/list (`src/session.rs`, `~/.yoda/sessions/*.json`) with `/save /load
   /sessions /reset /help` slash-commands in `src/main.rs`. 5 unit tests passing.
   Verified live: grep located a symbol's file+line; session round-trip via slash-commands.
-- Phases 4–5: not started.
+- **Phase 4 — DONE & tested 2026-06-05.** Minimal MCP stdio client (`src/mcp.rs`):
+  newline-delimited JSON-RPC 2.0, sequential/blocking request-response, handshake
+  (initialize + notifications/initialized), tools/list, tools/call. Remote tools wrapped as
+  `name__tool` and added to the registry; calls gated via `Action::External` (always Ask).
+  Config: `mcp.json` in project or `~/.yoda/` (see `mcp.json.example`). 9 unit tests passing.
+  Verified live against a local mock MCP server: connect/list/call round-trip + permission gate.
+- Phase 5: not started.
 
 ### Phase 3 decision: streaming deferred (deliberate, simpler-is-better)
 

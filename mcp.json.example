@@ -1,0 +1,9 @@
+{
+  "_comment": "Copy to 'mcp.json' (in the project dir or ~/.yoda/) to enable MCP servers. Each server is spawned as a subprocess and its tools become available as 'name__tool'. MCP tool calls always prompt for permission.",
+  "servers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allow"]
+    }
+  }
+}
