@@ -2,24 +2,15 @@
 //! search tools, sessions, MCP, skills, and runtime model switching.
 //! See DESIGN.md for the full plan.
 
-mod agent;
-mod config;
-mod mcp;
-mod permission;
-mod provider;
-mod session;
-mod skill;
-mod tools;
-mod ui;
-
 use std::io::{self, Write};
 
 use anyhow::Result;
 
-use config::Config;
-use permission::{Mode, Policy};
-use provider::{Message, OllamaProvider};
-use skill::Skill;
+use yoda::config::Config;
+use yoda::permission::{Mode, Policy};
+use yoda::provider::{Message, OllamaProvider};
+use yoda::skill::Skill;
+use yoda::{agent, mcp, session, skill, tools, ui};
 
 #[tokio::main]
 async fn main() -> Result<()> {
