@@ -121,6 +121,29 @@ pub fn thinking_phrase() -> &'static str {
     PHRASES[N.fetch_add(1, Ordering::Relaxed) % PHRASES.len()]
 }
 
+const DONE_VERBS: [&str; 4] = ["Pondered", "Meditated", "Reflected", "Mulled"];
+
+/// Format a duration compactly: `3.4s`, `42s`, `5m 12s`, `1h 3m`.
+pub fn fmt_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs >= 3600 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else if secs >= 10 {
+        format!("{secs}s")
+    } else {
+        format!("{:.1}s", d.as_secs_f64())
+    }
+}
+
+/// A dim-green summary printed after a turn, e.g. `✦ Pondered for 5m 12s`.
+pub fn elapsed_line(d: Duration) -> String {
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let verb = DONE_VERBS[N.fetch_add(1, Ordering::Relaxed) % DONE_VERBS.len()];
+    paint(&format!("✦ {verb} for {}", fmt_duration(d)), "2;32")
+}
+
 /// An animated single-line spinner showing a Yoda phrase and elapsed seconds,
 /// e.g. `⠹ Meditating, I am (3s)`. Runs on its own thread; stops and clears the
 /// line when dropped (or via [`Spinner::stop`]).
@@ -172,5 +195,18 @@ impl Drop for Spinner {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_durations_like_a_clock() {
+        assert_eq!(fmt_duration(Duration::from_secs(5 * 60 + 12)), "5m 12s");
+        assert_eq!(fmt_duration(Duration::from_secs(42)), "42s");
+        assert_eq!(fmt_duration(Duration::from_secs(3600 + 3 * 60)), "1h 3m");
+        assert_eq!(fmt_duration(Duration::from_millis(3400)), "3.4s");
     }
 }

@@ -23,6 +23,7 @@ pub async fn run_turn(
     history: &mut Vec<Message>,
 ) -> Result<()> {
     let specs = tools.specs();
+    let turn_start = std::time::Instant::now();
 
     for step in 0..MAX_STEPS {
         // Animate a Yoda-speak spinner with an elapsed clock while the model
@@ -74,6 +75,7 @@ pub async fn run_turn(
         ));
 
         if completion.tool_calls.is_empty() {
+            println!("{}", crate::ui::elapsed_line(turn_start.elapsed()));
             return Ok(()); // model gave a final answer
         }
 
@@ -88,6 +90,7 @@ pub async fn run_turn(
         crate::ui::yoda_label(),
         crate::ui::dim(&format!("[stopped after {MAX_STEPS} tool steps]"))
     );
+    println!("{}", crate::ui::elapsed_line(turn_start.elapsed()));
     Ok(())
 }
 
@@ -130,9 +133,16 @@ async fn execute_call(tools: &ToolRegistry, policy: &Policy, call: &ToolCall) ->
         }
     }
 
+    let started = std::time::Instant::now();
     match tool.run(&args).await {
         Ok(output) => {
-            println!("  {}\n", crate::ui::green("✓ done"));
+            println!(
+                "  {}\n",
+                crate::ui::green(&format!(
+                    "✓ done ({})",
+                    crate::ui::fmt_duration(started.elapsed())
+                ))
+            );
             output
         }
         Err(e) => {
