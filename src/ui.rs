@@ -55,6 +55,31 @@ pub fn yoda_label() -> String {
     paint("yoda ▸", "1;32")
 }
 
+pub fn bold_red(s: &str) -> String {
+    paint(s, "1;31")
+}
+
+/// Label for a question the model is asking the user (bold yellow).
+pub fn ask_label() -> String {
+    paint("yoda asks ▸", "1;33")
+}
+
+/// The `↳ ` prompt where the user types an answer to `ask_user` (bold cyan).
+pub fn answer_prompt() -> String {
+    paint("  ↳ ", "1;36")
+}
+
+/// The input prompt for the current permission mode. `normal` shows the plain
+/// cyan prompt; `auto`/`read-only` are flagged so you always know when risky
+/// actions are being auto-approved (or all mutations blocked).
+pub fn mode_prompt(mode: &str) -> String {
+    match mode {
+        "auto" => bold_red("you (auto) ▸ "),
+        "read-only" => yellow("you (read-only) ▸ "),
+        _ => user_prompt(),
+    }
+}
+
 // --- banner -------------------------------------------------------------------
 
 const LOGO: [&str; 5] = [

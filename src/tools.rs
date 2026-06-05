@@ -1,7 +1,8 @@
 //! The tool set the agent can call. Kept deliberately small — local 7B models
 //! choose poorly when given many tools. Each tool declares the `Action`s it
 //! would take so the permission gate can vet it before `run`. Current tools:
-//! read_file, write_file, edit_file, run_bash, glob_files, grep_files, web_fetch.
+//! read_file, write_file, edit_file, run_bash, glob_files, grep_files,
+//! web_fetch, web_search, ask_user.
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -73,6 +74,8 @@ pub fn default_registry(project_dir: PathBuf) -> ToolRegistry {
             }),
             Box::new(GrepFiles { root: project_dir }),
             Box::new(WebFetch),
+            Box::new(WebSearch),
+            Box::new(AskUser),
         ],
     }
 }
@@ -578,6 +581,195 @@ impl Tool for WebFetch {
     }
 }
 
+// --- ask the user ---
+
+struct AskUser;
+
+#[async_trait]
+impl Tool for AskUser {
+    fn name(&self) -> &str {
+        "ask_user"
+    }
+    fn description(&self) -> &str {
+        "Ask the user a question when you are missing information or unsure how to proceed. Returns the user's typed answer. Prefer this over guessing."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "question": { "type": "string", "description": "The question to ask the user." }
+            },
+            "required": ["question"]
+        })
+    }
+    fn actions(&self, _args: &Value) -> Vec<Action> {
+        vec![] // asking a question is not a side effect — no permission needed
+    }
+    async fn run(&self, args: &Value) -> Result<String> {
+        use std::io::Write;
+        let question = get_str(args, "question")?;
+        println!("\n{} {question}", crate::ui::ask_label());
+        print!("{}", crate::ui::answer_prompt());
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| anyhow!("could not read answer: {e}"))?;
+        println!();
+        let answer = line.trim();
+        if answer.is_empty() {
+            Ok("The user gave no answer.".to_string())
+        } else {
+            Ok(format!("The user answered: {answer}"))
+        }
+    }
+}
+
+// --- web search (DuckDuckGo) ---
+
+const SEARCH_RESULTS: usize = 8;
+
+struct WebSearch;
+
+#[async_trait]
+impl Tool for WebSearch {
+    fn name(&self) -> &str {
+        "web_search"
+    }
+    fn description(&self) -> &str {
+        "Search the web and return the top results as 'title — url'. Use it to find pages on a topic, then read one with web_fetch."
+    }
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "What to search for." }
+            },
+            "required": ["query"]
+        })
+    }
+    fn actions(&self, args: &Value) -> Vec<Action> {
+        // Network egress (the query goes to DuckDuckGo) — gate like a fetch.
+        match args.get("query").and_then(|v| v.as_str()).map(ddg_url) {
+            Some(Ok(u)) => vec![Action::Fetch(u.to_string())],
+            _ => vec![],
+        }
+    }
+    async fn run(&self, args: &Value) -> Result<String> {
+        let query = get_str(args, "query")?;
+        let url = ddg_url(&query)?;
+        guard_fetch_target(&url)?;
+
+        let client = reqwest::Client::builder()
+            .user_agent("Mozilla/5.0 (compatible; yoda/0.1; +web_search)")
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .map_err(|e| anyhow!("could not build HTTP client: {e}"))?;
+
+        let html = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| anyhow!("search request failed: {e}"))?
+            .error_for_status()
+            .map_err(|e| anyhow!("search returned an error: {e}"))?
+            .text()
+            .await
+            .map_err(|e| anyhow!("could not read search results: {e}"))?;
+
+        let results = parse_ddg(&html);
+        if results.is_empty() {
+            return Ok(format!(
+                "No results parsed for '{query}'. The search page may have changed; try web_fetch on a specific URL instead."
+            ));
+        }
+        let mut out = format!("Search results for '{query}':\n");
+        for (i, (title, link)) in results.iter().enumerate() {
+            out.push_str(&format!("{}. {title} — {link}\n", i + 1));
+        }
+        Ok(truncate(out))
+    }
+}
+
+/// Build the DuckDuckGo HTML-results URL for a query.
+fn ddg_url(query: &str) -> Result<reqwest::Url> {
+    let mut u = reqwest::Url::parse("https://html.duckduckgo.com/html/")
+        .map_err(|e| anyhow!("bad search URL: {e}"))?;
+    u.query_pairs_mut().append_pair("q", query);
+    Ok(u)
+}
+
+/// Extract `(title, url)` pairs from a DuckDuckGo HTML results page. Best-effort
+/// scraping: DuckDuckGo wraps each result link in a `result__a` anchor whose
+/// `href` is a `/l/?uddg=<real-url>` redirect.
+fn parse_ddg(html: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for seg in html.split("class=\"result__a\"").skip(1) {
+        let Some(href) = slice_between(seg, "href=\"", "\"") else {
+            continue;
+        };
+        let title = slice_between(seg, ">", "</a>")
+            .map(|t| decode_entities(&strip_tags(&t)))
+            .unwrap_or_default();
+        if let Some(link) = decode_ddg_redirect(&href)
+            && !title.is_empty()
+        {
+            out.push((title, link));
+        }
+        if out.len() >= SEARCH_RESULTS {
+            break;
+        }
+    }
+    out
+}
+
+fn slice_between(s: &str, start: &str, end: &str) -> Option<String> {
+    let from = s.find(start)? + start.len();
+    let rest = &s[from..];
+    let to = rest.find(end)?;
+    Some(rest[..to].to_string())
+}
+
+fn strip_tags(s: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.trim().to_string()
+}
+
+fn decode_entities(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+}
+
+/// Turn a DuckDuckGo `//duckduckgo.com/l/?uddg=<encoded>` redirect into the real
+/// target URL; pass through plain http(s) links unchanged.
+fn decode_ddg_redirect(href: &str) -> Option<String> {
+    let full = match href.strip_prefix("//") {
+        Some(rest) => format!("https://{rest}"),
+        None => href.to_string(),
+    };
+    let u = reqwest::Url::parse(&full).ok()?;
+    if let Some((_, v)) = u.query_pairs().find(|(k, _)| k == "uddg") {
+        Some(v.into_owned())
+    } else if full.starts_with("http") {
+        Some(full)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,6 +822,29 @@ mod tests {
         assert!(blocked("http://[::1]/"));
         // A public IP literal is allowed (resolves without DNS, not in a blocked range).
         assert!(!blocked("http://93.184.216.34/"));
+    }
+
+    #[test]
+    fn parses_duckduckgo_results() {
+        let html = concat!(
+            r#"<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa&amp;rut=x">Example &amp; <b>A</b></a>"#,
+            r#" junk <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rust-lang.org%2F">Rust</a>"#,
+        );
+        let r = parse_ddg(html);
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].0, "Example & A");
+        assert_eq!(r[0].1, "https://example.com/a");
+        assert_eq!(r[1].1, "https://www.rust-lang.org/");
+    }
+
+    #[tokio::test]
+    #[ignore = "hits the network"]
+    async fn web_search_returns_results() {
+        let out = WebSearch
+            .run(&json!({ "query": "rust programming language" }))
+            .await
+            .unwrap();
+        assert!(out.contains("http"), "got: {out}");
     }
 
     #[tokio::test]

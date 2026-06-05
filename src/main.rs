@@ -17,7 +17,7 @@ use std::io::{self, Write};
 use anyhow::Result;
 
 use config::Config;
-use permission::Policy;
+use permission::{Mode, Policy};
 use provider::{Message, OllamaProvider};
 use skill::Skill;
 
@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
     let mut provider = OllamaProvider::new(&cfg.base_url, &cfg.model);
     let mut tools = tools::default_registry(cfg.project_dir.clone());
     let mcp_servers = mcp::setup(&cfg.project_dir, &mut tools);
-    let policy = Policy::new(cfg.project_dir.clone(), cfg.allowed_commands.clone());
+    let mut policy = Policy::new(cfg.project_dir.clone(), cfg.allowed_commands.clone());
     let sessions_dir = session::sessions_dir();
     let skills = skill::load_all(&skill::skills_dir());
 
@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
     let mut history = vec![Message::system(&cfg.system_prompt)];
 
     loop {
-        print!("{}", ui::user_prompt());
+        print!("{}", ui::mode_prompt(policy.mode().label()));
         io::stdout().flush()?;
 
         let mut input = String::new();
@@ -57,7 +57,14 @@ async fn main() -> Result<()> {
         }
 
         if let Some(rest) = input.strip_prefix('/') {
-            if handle_command(rest, &mut history, &sessions_dir, &mut provider, &skills) {
+            if handle_command(
+                rest,
+                &mut history,
+                &sessions_dir,
+                &mut provider,
+                &mut policy,
+                &skills,
+            ) {
                 break;
             }
             continue;
@@ -77,6 +84,7 @@ fn handle_command(
     history: &mut Vec<Message>,
     sessions_dir: &std::path::Path,
     provider: &mut OllamaProvider,
+    policy: &mut Policy,
     skills: &[Skill],
 ) -> bool {
     let mut parts = input.splitn(2, char::is_whitespace);
@@ -142,6 +150,31 @@ fn handle_command(
                 println!("(model → {arg})\n");
             }
         }
+        "mode" => {
+            if arg.is_empty() {
+                println!(
+                    "mode: {} (normal | auto | read-only)\n",
+                    policy.mode().label()
+                );
+            } else {
+                match Mode::parse(arg) {
+                    Some(Mode::Auto) => {
+                        policy.set_mode(Mode::Auto);
+                        println!(
+                            "{}\n",
+                            ui::bold_red(
+                                "(mode → auto) EVERYTHING is now auto-approved, including destructive commands. /mode normal to undo."
+                            )
+                        );
+                    }
+                    Some(m) => {
+                        policy.set_mode(m);
+                        println!("(mode → {})\n", m.label());
+                    }
+                    None => println!("unknown mode '{arg}'. Try: normal, auto, read-only\n"),
+                }
+            }
+        }
         other => println!("unknown command /{other}. Try /help\n"),
     }
     false
@@ -152,6 +185,7 @@ fn print_help() {
         "commands:\n  \
          /help              show this help\n  \
          /model [name]      show or switch the active model\n  \
+         /mode [name]       permission mode: normal | auto | read-only\n  \
          /skills            list available skills\n  \
          /skill <name>      activate a skill (inject its instructions)\n  \
          /save [name]       save the conversation (default: 'default')\n  \

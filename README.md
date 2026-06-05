@@ -47,6 +47,7 @@ access outside it, and non-allowlisted shell commands, prompt for permission.
 
 ```
 /model [name]    show or switch the active model
+/mode [name]     permission mode: normal | auto | read-only
 /skills          list available skills
 /skill <name>    activate a skill (inject its instructions)
 /save [name]     save the conversation to ~/.yoda/sessions
@@ -60,8 +61,21 @@ access outside it, and non-allowlisted shell commands, prompt for permission.
 ## Tools
 
 `read_file`, `write_file`, `edit_file`, `run_bash`, `glob_files`, `grep_files`,
-`web_fetch` (fetch an http/https URL and return its text with HTML stripped —
-prompts before the request), plus any tools provided by configured MCP servers.
+`web_fetch` (fetch an http/https URL and return its text with HTML stripped),
+`web_search` (search the web via DuckDuckGo), `ask_user` (the model asks you a
+question when it's unsure or missing info), plus any tools provided by configured
+MCP servers.
+
+## Modes
+
+`/mode` sets how the permission gate behaves:
+
+- **`normal`** (default) — prompt before risky actions (writes/commands outside
+  the safe set, network, MCP calls).
+- **`auto`** — auto-approve **everything**, including destructive commands. The
+  prompt turns red (`you (auto) ▸`) so you always know it's on.
+- **`read-only`** — allow reads; block all writes, commands, and network. Safe
+  exploration.
 
 ## Skills
 

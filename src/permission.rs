@@ -44,9 +44,41 @@ pub enum Decision {
     Deny,
 }
 
+/// How aggressively the policy approves actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// Ask before risky actions (the safe default).
+    #[default]
+    Normal,
+    /// Auto-approve EVERYTHING, including otherwise-catastrophic commands.
+    Auto,
+    /// Allow reads; block all writes, commands, fetches, and external calls.
+    ReadOnly,
+}
+
+impl Mode {
+    pub fn parse(s: &str) -> Option<Mode> {
+        match s.trim().to_lowercase().as_str() {
+            "normal" | "ask" => Some(Mode::Normal),
+            "auto" | "yolo" => Some(Mode::Auto),
+            "read-only" | "readonly" | "read" | "ro" => Some(Mode::ReadOnly),
+            _ => None,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Mode::Normal => "normal",
+            Mode::Auto => "auto",
+            Mode::ReadOnly => "read-only",
+        }
+    }
+}
+
 pub struct Policy {
     project_dir: PathBuf,
     allowed_commands: Vec<String>,
+    mode: Mode,
 }
 
 impl Policy {
@@ -54,10 +86,40 @@ impl Policy {
         Self {
             project_dir,
             allowed_commands,
+            mode: Mode::Normal,
         }
     }
 
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+    }
+
     pub fn check(&self, action: &Action) -> Decision {
+        // Mode overrides come first.
+        match self.mode {
+            // The user explicitly chose "truly allow everything" for auto mode —
+            // no exceptions, not even the catastrophic-command seatbelt.
+            Mode::Auto => return Decision::Allow,
+            Mode::ReadOnly => {
+                return match action {
+                    Action::Read(p) => {
+                        if self.within_project(p) {
+                            Decision::Allow
+                        } else {
+                            Decision::Ask
+                        }
+                    }
+                    // No mutations, commands, network, or external calls.
+                    _ => Decision::Deny,
+                };
+            }
+            Mode::Normal => {}
+        }
+
         match action {
             Action::Read(p) | Action::Write(p) => {
                 if self.within_project(p) {
@@ -211,7 +273,10 @@ mod tests {
             p.check(&Action::Write("src/new.rs".into())),
             Decision::Allow
         );
-        assert_eq!(p.check(&Action::Write(dir.join("a/b.txt"))), Decision::Allow);
+        assert_eq!(
+            p.check(&Action::Write(dir.join("a/b.txt"))),
+            Decision::Allow
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -243,6 +308,44 @@ mod tests {
         assert_eq!(p.check(&Action::Run("ls && curl x".into())), Decision::Ask);
         // and if the chained tail is catastrophic, it's denied outright (stronger)
         assert_eq!(p.check(&Action::Run("ls; rm -rf ~".into())), Decision::Deny);
+    }
+
+    #[test]
+    fn auto_mode_allows_everything_including_catastrophic() {
+        let mut p = policy();
+        p.set_mode(Mode::Auto);
+        assert_eq!(p.check(&Action::Run("rm -rf /".into())), Decision::Allow);
+        assert_eq!(
+            p.check(&Action::Write("/etc/passwd".into())),
+            Decision::Allow
+        );
+        assert_eq!(
+            p.check(&Action::Fetch("http://127.0.0.1".into())),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn read_only_mode_blocks_mutations() {
+        let dir = real_project("ro");
+        let mut p = Policy::new(dir.clone(), vec!["ls".into()]);
+        p.set_mode(Mode::ReadOnly);
+        assert_eq!(p.check(&Action::Read("src/x.rs".into())), Decision::Allow);
+        assert_eq!(p.check(&Action::Write("src/x.rs".into())), Decision::Deny);
+        assert_eq!(p.check(&Action::Run("ls".into())), Decision::Deny);
+        assert_eq!(
+            p.check(&Action::Fetch("https://example.com".into())),
+            Decision::Deny
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mode_parses_aliases() {
+        assert_eq!(Mode::parse("yolo"), Some(Mode::Auto));
+        assert_eq!(Mode::parse("read"), Some(Mode::ReadOnly));
+        assert_eq!(Mode::parse("normal"), Some(Mode::Normal));
+        assert_eq!(Mode::parse("nope"), None);
     }
 
     #[test]
