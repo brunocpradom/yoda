@@ -10,6 +10,7 @@ mod provider;
 mod session;
 mod skill;
 mod tools;
+mod ui;
 
 use std::io::{self, Write};
 
@@ -30,24 +31,20 @@ async fn main() -> Result<()> {
     let sessions_dir = session::sessions_dir();
     let skills = skill::load_all(&skill::skills_dir());
 
-    println!("Yoda — local agent harness (Phase 5: tools + sessions + MCP + skills)");
-    println!("  model:    {}", cfg.model);
-    println!("  endpoint: {}", cfg.base_url);
-    println!("  project:  {}", cfg.project_dir.display());
-    println!("  tools:    {}", tools.names().join(", "));
-    if !mcp_servers.is_empty() {
-        println!("  mcp:      {}", mcp_servers.join(", "));
-    }
-    if !skills.is_empty() {
-        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
-        println!("  skills:   {}", names.join(", "));
-    }
-    println!("Type a message, /help for commands, or /quit to exit.\n");
+    let skill_names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+    ui::banner(
+        &cfg.model,
+        &cfg.base_url,
+        &cfg.project_dir.display().to_string(),
+        &tools.names(),
+        &mcp_servers,
+        &skill_names,
+    );
 
     let mut history = vec![Message::system(&cfg.system_prompt)];
 
     loop {
-        print!("you ▸ ");
+        print!("{}", ui::user_prompt());
         io::stdout().flush()?;
 
         let mut input = String::new();
@@ -70,7 +67,7 @@ async fn main() -> Result<()> {
         agent::run_turn(&provider, &tools, &policy, &mut history).await?;
     }
 
-    println!("May the Force be with you.");
+    println!("{}", ui::green("May the Force be with you."));
     Ok(())
 }
 

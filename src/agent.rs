@@ -25,10 +25,16 @@ pub async fn run_turn(
     let specs = tools.specs();
 
     for step in 0..MAX_STEPS {
-        let mut completion = match provider.complete(history, &specs).await {
+        // Animate a Yoda-speak spinner with an elapsed clock while the model
+        // (which may take many seconds locally) produces its reply.
+        let spinner = crate::ui::Spinner::start(crate::ui::thinking_phrase());
+        let result = provider.complete(history, &specs).await;
+        spinner.stop();
+
+        let mut completion = match result {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[error: {e:#}]");
+                eprintln!("{}", crate::ui::red(&format!("[error: {e:#}]")));
                 return Ok(());
             }
         };
@@ -58,7 +64,7 @@ pub async fn run_turn(
         if let Some(text) = &completion.content {
             let trimmed = text.trim();
             if !trimmed.is_empty() {
-                println!("yoda ▸ {trimmed}\n");
+                println!("{} {trimmed}\n", crate::ui::yoda_label());
             }
         }
 
@@ -77,7 +83,11 @@ pub async fn run_turn(
         }
     }
 
-    println!("yoda ▸ [stopped after {MAX_STEPS} tool steps]\n");
+    println!(
+        "{} {}",
+        crate::ui::yoda_label(),
+        crate::ui::dim(&format!("[stopped after {MAX_STEPS} tool steps]"))
+    );
     Ok(())
 }
 
@@ -88,22 +98,32 @@ async fn execute_call(tools: &ToolRegistry, policy: &Policy, call: &ToolCall) ->
     let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
 
     let Some(tool) = tools.get(name) else {
-        println!("  🔧 {name} — unknown tool");
+        println!("  {} {name} — unknown tool", crate::ui::yellow("🔧"));
         return format!("Error: unknown tool '{name}'");
     };
 
-    println!("  🔧 {name}({})", compact(&args));
+    println!(
+        "  {} {}",
+        crate::ui::cyan("🔧"),
+        crate::ui::dim(&format!("{name}({})", compact(&args)))
+    );
 
     for action in tool.actions(&args) {
         match policy.check(&action) {
             Decision::Allow => {}
             Decision::Deny => {
-                println!("  ⛔ denied by policy: {}", action.describe());
+                println!(
+                    "  {}",
+                    crate::ui::red(&format!("⛔ denied by policy: {}", action.describe()))
+                );
                 return format!("Permission denied by policy: {}", action.describe());
             }
             Decision::Ask => {
                 if !ask_user(&action) {
-                    println!("  ⛔ you denied: {}", action.describe());
+                    println!(
+                        "  {}",
+                        crate::ui::yellow(&format!("⛔ you denied: {}", action.describe()))
+                    );
                     return format!("User denied permission: {}", action.describe());
                 }
             }
@@ -112,11 +132,11 @@ async fn execute_call(tools: &ToolRegistry, policy: &Policy, call: &ToolCall) ->
 
     match tool.run(&args).await {
         Ok(output) => {
-            println!("  ✓ done\n");
+            println!("  {}\n", crate::ui::green("✓ done"));
             output
         }
         Err(e) => {
-            println!("  ✗ {e}\n");
+            println!("  {}\n", crate::ui::red(&format!("✗ {e}")));
             format!("Error running {name}: {e}")
         }
     }
@@ -201,7 +221,10 @@ fn scan_json_objects(text: &str) -> Vec<Value> {
 }
 
 fn ask_user(action: &Action) -> bool {
-    print!("  ⚠ allow {}? [y/N] ", action.describe());
+    print!(
+        "  {} ",
+        crate::ui::yellow(&format!("⚠ allow {}? [y/N]", action.describe()))
+    );
     io::stdout().flush().ok();
     let mut line = String::new();
     if io::stdin().read_line(&mut line).is_err() {
