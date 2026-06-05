@@ -42,7 +42,10 @@ pub struct Policy {
 
 impl Policy {
     pub fn new(project_dir: PathBuf, allowed_commands: Vec<String>) -> Self {
-        Self { project_dir, allowed_commands }
+        Self {
+            project_dir,
+            allowed_commands,
+        }
     }
 
     pub fn check(&self, action: &Action) -> Decision {
@@ -100,8 +103,18 @@ impl Policy {
 fn is_catastrophic(cmd: &str) -> bool {
     let c = cmd.replace(' ', "");
     const PATTERNS: &[&str] = &[
-        "rm-rf/", "rm-fr/", "rm-rf~", "rm-fr~", "rm-rf*", "mkfs", "dd if=", "ddif=",
-        ":(){:|:&};:", ">/dev/sda", "chmod-R000", "rm-rf--no-preserve-root",
+        "rm-rf/",
+        "rm-fr/",
+        "rm-rf~",
+        "rm-fr~",
+        "rm-rf*",
+        "mkfs",
+        "dd if=",
+        "ddif=",
+        ":(){:|:&};:",
+        ">/dev/sda",
+        "chmod-R000",
+        "rm-rf--no-preserve-root",
     ];
     PATTERNS.iter().any(|p| c.contains(&p.replace(' ', "")))
 }
@@ -128,15 +141,24 @@ mod tests {
     fn policy() -> Policy {
         Policy::new(
             PathBuf::from("/home/me/project"),
-            ["ls", "cargo", "git"].iter().map(|s| s.to_string()).collect(),
+            ["ls", "cargo", "git"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         )
     }
 
     #[test]
     fn reads_and_writes_inside_project_are_allowed() {
         let p = policy();
-        assert_eq!(p.check(&Action::Read("src/main.rs".into())), Decision::Allow);
-        assert_eq!(p.check(&Action::Write("src/new.rs".into())), Decision::Allow);
+        assert_eq!(
+            p.check(&Action::Read("src/main.rs".into())),
+            Decision::Allow
+        );
+        assert_eq!(
+            p.check(&Action::Write("src/new.rs".into())),
+            Decision::Allow
+        );
         assert_eq!(
             p.check(&Action::Write("/home/me/project/a/b.txt".into())),
             Decision::Allow
@@ -160,7 +182,10 @@ mod tests {
         assert_eq!(p.check(&Action::Run("ls -la".into())), Decision::Allow);
         assert_eq!(p.check(&Action::Run("cargo test".into())), Decision::Allow);
         // not on the allowlist
-        assert_eq!(p.check(&Action::Run("curl example.com".into())), Decision::Ask);
+        assert_eq!(
+            p.check(&Action::Run("curl example.com".into())),
+            Decision::Ask
+        );
         // allowlisted program but chained with something else: must not slip through
         assert_eq!(p.check(&Action::Run("ls; echo hi".into())), Decision::Ask);
         assert_eq!(p.check(&Action::Run("ls && curl x".into())), Decision::Ask);
@@ -176,6 +201,9 @@ mod tests {
             p.check(&Action::Run("rm -rf --no-preserve-root /".into())),
             Decision::Deny
         );
-        assert_eq!(p.check(&Action::Run(":(){ :|:& };:".into())), Decision::Deny);
+        assert_eq!(
+            p.check(&Action::Run(":(){ :|:& };:".into())),
+            Decision::Deny
+        );
     }
 }

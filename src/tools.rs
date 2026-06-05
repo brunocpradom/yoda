@@ -29,7 +29,10 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools.iter().find(|t| t.name() == name).map(|b| b.as_ref())
+        self.tools
+            .iter()
+            .find(|t| t.name() == name)
+            .map(|b| b.as_ref())
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
@@ -115,8 +118,8 @@ impl Tool for ReadFile {
     }
     async fn run(&self, args: &Value) -> Result<String> {
         let path = get_str(args, "path")?;
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow!("could not read {path}: {e}"))?;
+        let content =
+            std::fs::read_to_string(&path).map_err(|e| anyhow!("could not read {path}: {e}"))?;
         Ok(truncate(content))
     }
 }
@@ -147,10 +150,11 @@ impl Tool for WriteFile {
     async fn run(&self, args: &Value) -> Result<String> {
         let path = get_str(args, "path")?;
         let content = get_str(args, "content")?;
-        if let Some(parent) = Path::new(&path).parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).ok();
-            }
+        if let Some(parent) = Path::new(&path).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow!("could not create {}: {e}", parent.display()))?;
         }
         std::fs::write(&path, &content).map_err(|e| anyhow!("could not write {path}: {e}"))?;
         Ok(format!("Wrote {} bytes to {path}", content.len()))
@@ -193,7 +197,9 @@ impl Tool for EditFile {
         }
         let updated = content.replacen(&old, &new, 1);
         std::fs::write(&path, &updated).map_err(|e| anyhow!("could not write {path}: {e}"))?;
-        Ok(format!("Edited {path} (replaced 1 of {count} occurrence(s))"))
+        Ok(format!(
+            "Edited {path} (replaced 1 of {count} occurrence(s))"
+        ))
     }
 }
 

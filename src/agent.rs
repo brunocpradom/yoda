@@ -37,13 +37,13 @@ pub async fn run_turn(
         // the structured `tool_calls` field (e.g. qwen2.5-coder). If the reply
         // has no native tool calls but its text contains tool-call JSON for a
         // known tool, treat that as the tool call and don't echo the raw JSON.
-        if completion.tool_calls.is_empty() {
-            if let Some(text) = &completion.content {
-                let recovered = extract_tool_calls(text, tools);
-                if !recovered.is_empty() {
-                    completion.tool_calls = recovered;
-                    completion.content = None;
-                }
+        if completion.tool_calls.is_empty()
+            && let Some(text) = &completion.content
+        {
+            let recovered = extract_tool_calls(text, tools);
+            if !recovered.is_empty() {
+                completion.tool_calls = recovered;
+                completion.content = None;
             }
         }
 
@@ -62,7 +62,10 @@ pub async fn run_turn(
             }
         }
 
-        history.push(Message::assistant(completion.content.clone(), completion.tool_calls.clone()));
+        history.push(Message::assistant(
+            completion.content.clone(),
+            completion.tool_calls.clone(),
+        ));
 
         if completion.tool_calls.is_empty() {
             return Ok(()); // model gave a final answer
@@ -144,7 +147,10 @@ fn extract_tool_calls(text: &str, tools: &ToolRegistry) -> Vec<ToolCall> {
         calls.push(ToolCall {
             id: String::new(),
             kind: "function".into(),
-            function: FunctionCall { name: name.to_string(), arguments },
+            function: FunctionCall {
+                name: name.to_string(),
+                arguments,
+            },
         });
     }
     calls
@@ -181,12 +187,11 @@ fn scan_json_objects(text: &str) -> Vec<Value> {
             }
             b'}' if depth > 0 => {
                 depth -= 1;
-                if depth == 0 {
-                    if let Ok(value) = serde_json::from_str::<Value>(&text[start..=i]) {
-                        if value.is_object() {
-                            out.push(value);
-                        }
-                    }
+                if depth == 0
+                    && let Ok(value) = serde_json::from_str::<Value>(&text[start..=i])
+                    && value.is_object()
+                {
+                    out.push(value);
                 }
             }
             _ => {}

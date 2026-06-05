@@ -25,23 +25,42 @@ pub struct Message {
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: "system".into(), content: Some(content.into()), tool_calls: None, tool_call_id: None }
+        Self {
+            role: "system".into(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: "user".into(), content: Some(content.into()), tool_calls: None, tool_call_id: None }
+        Self {
+            role: "user".into(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+        }
     }
     /// An assistant turn, which may carry text, tool calls, or both.
     pub fn assistant(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
         Self {
             role: "assistant".into(),
             content,
-            tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
             tool_call_id: None,
         }
     }
     /// The result of running a tool, fed back to the model.
     pub fn tool_result(tool_call_id: String, content: String) -> Self {
-        Self { role: "tool".into(), content: Some(content), tool_calls: None, tool_call_id: Some(tool_call_id) }
+        Self {
+            role: "tool".into(),
+            content: Some(content),
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id),
+        }
     }
 }
 

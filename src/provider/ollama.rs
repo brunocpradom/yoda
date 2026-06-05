@@ -55,8 +55,10 @@ impl Provider for OllamaProvider {
             .error_for_status()
             .context("model server returned an error (is the model pulled?)")?;
 
-        let parsed: CompletionResponse =
-            response.json().await.context("could not parse model response")?;
+        let parsed: CompletionResponse = response
+            .json()
+            .await
+            .context("could not parse model response")?;
 
         let message = parsed
             .choices
