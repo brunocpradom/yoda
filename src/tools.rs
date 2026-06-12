@@ -6,14 +6,30 @@
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use serde_json::{Value, json};
-use std::net::ToSocketAddrs;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::permission::Action;
 use crate::provider::{ToolFunction, ToolSpec};
 
 const MAX_OUTPUT_CHARS: usize = 20_000;
+
+/// Hard ceiling on bytes `read_file` pulls into memory before char-truncation.
+/// Stops a multi-GB file from OOM-ing the process — the model only ever sees the
+/// first `MAX_OUTPUT_CHARS` anyway.
+const MAX_READ_BYTES: u64 = 5_000_000;
+
+/// Per-stream ceiling on bytes captured from a `run_bash` child. We keep draining
+/// past it (so the child never blocks on a full pipe) but stop *storing*, so a
+/// runaway `yes`-style command can't exhaust memory.
+const MAX_CAPTURE_BYTES: usize = 1_000_000;
+
+/// Wall-clock limit for a single `run_bash` command. A hung command (a server, a
+/// REPL, an infinite loop) is killed instead of stalling the turn forever.
+const RUN_BASH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -68,7 +84,9 @@ pub fn default_registry(project_dir: PathBuf) -> ToolRegistry {
             Box::new(ReadFile),
             Box::new(WriteFile),
             Box::new(EditFile),
-            Box::new(RunBash),
+            Box::new(RunBash {
+                root: project_dir.clone(),
+            }),
             Box::new(GlobFiles {
                 root: project_dir.clone(),
             }),
@@ -156,25 +174,97 @@ fn guard_fetch_target(u: &reqwest::Url) -> Result<()> {
 fn is_blocked_ip(ip: std::net::IpAddr) -> bool {
     use std::net::IpAddr;
     match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.octets()[0] == 0
-        }
+        IpAddr::V4(v4) => is_blocked_v4(v4),
         IpAddr::V6(v6) => {
             v6.is_loopback()
                 || v6.is_unspecified()
                 || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
                 || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
-                || v6
-                    .to_ipv4_mapped()
-                    .map(|m| m.is_loopback() || m.is_private() || m.is_link_local())
-                    .unwrap_or(false)
+                || is_nat64(v6)                          // 64:ff9b::/96 embeds a v4 target
+                // An IPv4-mapped v6 address (::ffff:a.b.c.d) reaches the same v4
+                // host — vet it with the identical rules.
+                || v6.to_ipv4_mapped().map(is_blocked_v4).unwrap_or(false)
         }
     }
+}
+
+fn is_blocked_v4(v4: std::net::Ipv4Addr) -> bool {
+    v4.is_loopback()
+        || v4.is_private()        // 10/8, 172.16/12, 192.168/16
+        || v4.is_link_local()     // 169.254/16 (incl. cloud metadata 169.254.169.254)
+        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_multicast()      // 224/4
+        || v4.octets()[0] == 0    // 0/8 "this network"
+        || is_cgnat(v4) // 100.64/10 carrier-grade NAT (e.g. Tailscale)
+}
+
+/// 100.64.0.0/10 — RFC 6598 shared address space (carrier-grade NAT, Tailscale
+/// CGNAT range). `Ipv4Addr::is_shared` would cover this but is still unstable, so
+/// we check the prefix by hand.
+fn is_cgnat(v4: std::net::Ipv4Addr) -> bool {
+    let o = v4.octets();
+    o[0] == 100 && (o[1] & 0xc0) == 0x40
+}
+
+/// 64:ff9b::/96 — the RFC 6052 well-known prefix used to embed an IPv4 target in
+/// an IPv6 address for NAT64. Block the whole prefix: fetching through it is a way
+/// to reach an internal v4 host that the v6 rules above wouldn't otherwise catch.
+fn is_nat64(v6: std::net::Ipv6Addr) -> bool {
+    let s = v6.segments();
+    s[0] == 0x0064 && s[1] == 0xff9b
+}
+
+/// A reqwest DNS resolver that resolves a host once and refuses the request if
+/// any resolved address is loopback/private/link-local/etc.
+///
+/// Why a custom resolver rather than a pre-flight check: it closes the
+/// DNS-rebinding TOCTOU. A separate "resolve, inspect, then hand the *hostname*
+/// to reqwest" sequence lets the name re-resolve to a different (internal) IP at
+/// connect time. Here the addresses we vet are the exact addresses reqwest dials,
+/// and the resolver runs for the initial host *and every redirect hop*, so there
+/// is no second, unchecked resolution. `YODA_ALLOW_LOCAL_FETCH=1` opts out.
+struct GuardedResolver;
+
+impl Resolve for GuardedResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            // getaddrinfo is blocking — keep it off the async runtime thread.
+            let joined = tokio::task::spawn_blocking(move || resolve_guarded(&host)).await;
+            match joined {
+                Ok(Ok(addrs)) => Ok(Box::new(addrs.into_iter()) as Addrs),
+                Ok(Err(e)) => Err(e),
+                Err(join) => Err(Box::new(join) as Box<dyn std::error::Error + Send + Sync>),
+            }
+        })
+    }
+}
+
+/// Resolve `host` and return its addresses only if none are blocked. Port 0 is a
+/// placeholder — reqwest overrides it with the scheme's port.
+fn resolve_guarded(
+    host: &str,
+) -> Result<Vec<SocketAddr>, Box<dyn std::error::Error + Send + Sync>> {
+    let addrs: Vec<SocketAddr> = (host, 0)
+        .to_socket_addrs()
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+            format!("could not resolve host '{host}': {e}").into()
+        })?
+        .collect();
+    if addrs.is_empty() {
+        return Err(format!("could not resolve host '{host}'").into());
+    }
+    if std::env::var_os("YODA_ALLOW_LOCAL_FETCH").is_none()
+        && let Some(blocked) = addrs.iter().find(|a| is_blocked_ip(a.ip()))
+    {
+        return Err(format!(
+            "refusing to connect to a private/loopback/link-local address ({}) for host '{host}'; set YODA_ALLOW_LOCAL_FETCH=1 to override",
+            blocked.ip()
+        )
+        .into());
+    }
+    Ok(addrs)
 }
 
 // --- tools ---
@@ -205,10 +295,16 @@ impl Tool for ReadFile {
         }
     }
     async fn run(&self, args: &Value) -> Result<String> {
+        use std::io::Read;
         let path = get_str(args, "path")?;
-        let content =
-            std::fs::read_to_string(&path).map_err(|e| anyhow!("could not read {path}: {e}"))?;
-        Ok(truncate(content))
+        let file = std::fs::File::open(&path).map_err(|e| anyhow!("could not read {path}: {e}"))?;
+        // Bound the read so a huge file can't OOM us before truncation. Lossy
+        // decode keeps a partial/odd-byte file readable rather than erroring.
+        let mut buf = Vec::new();
+        file.take(MAX_READ_BYTES)
+            .read_to_end(&mut buf)
+            .map_err(|e| anyhow!("could not read {path}: {e}"))?;
+        Ok(truncate(String::from_utf8_lossy(&buf).into_owned()))
     }
 }
 
@@ -291,7 +387,9 @@ impl Tool for EditFile {
     }
 }
 
-struct RunBash;
+struct RunBash {
+    root: PathBuf,
+}
 
 #[async_trait]
 impl Tool for RunBash {
@@ -318,20 +416,86 @@ impl Tool for RunBash {
     }
     async fn run(&self, args: &Value) -> Result<String> {
         let command = get_str(args, "command")?;
-        let output = std::process::Command::new("bash")
+
+        // tokio (not std) process: blocking the async runtime on a child that may
+        // run for minutes is exactly the pitfall we want to avoid, and tokio gives
+        // us the cancellable wait the timeout needs.
+        let mut child = tokio::process::Command::new("bash")
             .arg("-c")
             .arg(&command)
-            .output()
+            // Pin the cwd to the project dir instead of relying on inherited state.
+            .current_dir(&self.root)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .map_err(|e| anyhow!("could not run command: {e}"))?;
-        let mut out = String::new();
-        out.push_str(&String::from_utf8_lossy(&output.stdout));
-        if !output.stderr.is_empty() {
-            out.push_str("\n[stderr]\n");
-            out.push_str(&String::from_utf8_lossy(&output.stderr));
+
+        // `take()` the pipes so draining them doesn't borrow the child — we still
+        // need `child` afterwards to wait on (or kill) it.
+        let mut stdout_pipe = child.stdout.take().expect("stdout piped above");
+        let mut stderr_pipe = child.stderr.take().expect("stderr piped above");
+
+        // Drain both pipes while waiting, so a child that fills a pipe buffer
+        // doesn't deadlock, and cap what we *store* so it can't exhaust memory.
+        let pump = async {
+            let (out, err, status) = tokio::join!(
+                read_capped(&mut stdout_pipe, MAX_CAPTURE_BYTES),
+                read_capped(&mut stderr_pipe, MAX_CAPTURE_BYTES),
+                child.wait(),
+            );
+            Ok::<_, std::io::Error>((out?, err?, status?))
+        };
+
+        // Bind to a local so the timeout future (which borrows `child` via `pump`)
+        // is dropped at this statement's end — releasing the borrow so the timeout
+        // arm below can kill `child`.
+        let outcome = tokio::time::timeout(RUN_BASH_TIMEOUT, pump).await;
+        match outcome {
+            Ok(Ok((stdout, stderr, status))) => {
+                let mut out = String::new();
+                out.push_str(&String::from_utf8_lossy(&stdout));
+                if !stderr.is_empty() {
+                    out.push_str("\n[stderr]\n");
+                    out.push_str(&String::from_utf8_lossy(&stderr));
+                }
+                let code = status.code().unwrap_or(-1);
+                Ok(truncate(format!("(exit {code})\n{}", out.trim_end())))
+            }
+            Ok(Err(e)) => Err(anyhow!("command I/O failed: {e}")),
+            Err(_elapsed) => {
+                // `pump` (which borrowed `child`) is dropped here, releasing the
+                // borrow so we can kill and reap the runaway process.
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                Ok(format!(
+                    "(timed out after {}s — process killed)",
+                    RUN_BASH_TIMEOUT.as_secs()
+                ))
+            }
         }
-        let code = output.status.code().unwrap_or(-1);
-        Ok(truncate(format!("(exit {code})\n{}", out.trim_end())))
     }
+}
+
+/// Read `reader` to EOF, storing at most `cap` bytes but continuing to drain the
+/// rest (so the child process never blocks on a full pipe).
+async fn read_capped<R>(reader: &mut R, cap: usize) -> std::io::Result<Vec<u8>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        if buf.len() < cap {
+            let take = (cap - buf.len()).min(n);
+            buf.extend_from_slice(&chunk[..take]);
+        }
+    }
+    Ok(buf)
 }
 
 // --- search tools (read-only, scoped to the project directory) ---
@@ -533,15 +697,12 @@ impl Tool for WebFetch {
         let client = reqwest::Client::builder()
             .user_agent("yoda/0.1 (+web_fetch)")
             .timeout(std::time::Duration::from_secs(20))
-            // Re-check every redirect hop so a public URL can't bounce us to an
-            // internal address (SSRF via redirect).
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= 10 || guard_fetch_target(attempt.url()).is_err() {
-                    attempt.stop()
-                } else {
-                    attempt.follow()
-                }
-            }))
+            // Authoritative SSRF guard: every connection (initial host and each
+            // redirect hop) resolves through GuardedResolver, which refuses
+            // private/loopback/link-local targets at the address actually dialed —
+            // immune to DNS-rebinding between check and connect.
+            .dns_resolver(Arc::new(GuardedResolver))
+            .redirect(reqwest::redirect::Policy::limited(10))
             .build()
             .map_err(|e| anyhow!("could not build HTTP client: {e}"))?;
 
@@ -663,6 +824,9 @@ impl Tool for WebSearch {
         let client = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (compatible; yoda/0.1; +web_search)")
             .timeout(std::time::Duration::from_secs(20))
+            // Same rebinding-proof guard as web_fetch (DDG is public, but the
+            // resolver costs nothing and keeps the two paths consistent).
+            .dns_resolver(Arc::new(GuardedResolver))
             .build()
             .map_err(|e| anyhow!("could not build HTTP client: {e}"))?;
 
@@ -830,8 +994,27 @@ mod tests {
         assert!(blocked("http://172.16.9.9/"));
         assert!(blocked("http://localhost/"));
         assert!(blocked("http://[::1]/"));
+        assert!(blocked("http://100.64.1.1/")); // carrier-grade NAT (100.64/10)
+        assert!(blocked("http://[64:ff9b::7f00:1]/")); // NAT64 well-known prefix
         // A public IP literal is allowed (resolves without DNS, not in a blocked range).
         assert!(!blocked("http://93.184.216.34/"));
+    }
+
+    #[test]
+    fn ip_range_classification() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        // CGNAT 100.64.0.0/10 boundaries: .64–.127 blocked, .63/.128 are not.
+        assert!(is_cgnat("100.64.0.0".parse::<Ipv4Addr>().unwrap()));
+        assert!(is_cgnat("100.127.255.255".parse::<Ipv4Addr>().unwrap()));
+        assert!(!is_cgnat("100.63.255.255".parse::<Ipv4Addr>().unwrap()));
+        assert!(!is_cgnat("100.128.0.0".parse::<Ipv4Addr>().unwrap()));
+        // 100.0.0.1 is ordinary public space, not CGNAT.
+        assert!(!is_blocked_v4("100.0.0.1".parse().unwrap()));
+        // NAT64 64:ff9b::/96.
+        assert!(is_nat64("64:ff9b::7f00:1".parse::<Ipv6Addr>().unwrap()));
+        assert!(!is_nat64("2001:db8::1".parse::<Ipv6Addr>().unwrap()));
+        // IPv4-mapped loopback is still caught.
+        assert!(is_blocked_ip("::ffff:127.0.0.1".parse().unwrap()));
     }
 
     #[test]

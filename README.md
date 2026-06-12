@@ -77,6 +77,19 @@ MCP servers.
 - **`read-only`** — allow reads; block all writes, commands, and network. Safe
   exploration.
 
+## Security
+
+The model decides which tools to run on your machine, so the trust boundary is
+**you reviewing the permission prompts** (the model running locally backs that
+up). Tool results — fetched pages, file contents, MCP output — feed back into the
+model, so untrusted content can carry instructions it may act on (indirect prompt
+injection). In `normal`/`read-only` mode the prompt still gates real side
+effects; **never run `auto` mode against untrusted content** — it approves
+everything with nothing in between. `web_fetch`/`web_search` block
+private/loopback/metadata targets (rebinding-proof, re-checked on redirects).
+Don't commit a real `mcp.json` (it's gitignored; it can hold OAuth secrets). Full
+details and how to report a vulnerability: [SECURITY.md](SECURITY.md).
+
 ## Skills
 
 Drop `*.md` files in `~/.yoda/skills/`. Optional frontmatter sets a description;

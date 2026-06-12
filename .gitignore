@@ -1,1 +1,6 @@
 /target
+
+# MCP server config: may hold OAuth client secrets / per-server credentials.
+# Only the .example template is tracked — never the live file.
+mcp.json
+/.yoda/
