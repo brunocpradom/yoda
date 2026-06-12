@@ -1,20 +1,28 @@
 name: CI
 
+# Runs on every PR (to any branch) and on pushes to main. These are the gates a
+# PR must pass: Rust quality (fmt, clippy, tests, release build) + security
+# (RustSec advisories, banned/duplicate crates, trusted dependency sources).
 on:
   push:
     branches: [main]
   pull_request:
 
-# Least privilege: the jobs only read the repo.
+# Least privilege: jobs only read the repo.
 permissions:
   contents: read
+
+# A new push to a PR cancels the previous, still-running CI for that ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: fmt · clippy · test
+  rust:
+    name: fmt · clippy · test · build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,9 +33,13 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy (warnings are errors)
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - name: Test
         run: cargo test --all --locked
+      # Build the actual release binary users run, with --locked so a drifted
+      # Cargo.lock fails CI instead of silently resolving new versions.
+      - name: Release build
+        run: cargo build --release --locked
 
   audit:
     name: cargo audit (RustSec advisories)
@@ -36,10 +48,21 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Installs cargo-audit, then fails the job on any unpatched advisory in
-      # Cargo.lock. Swap for the official `rustsec/audit-check` action if you'd
-      # rather have inline PR annotations.
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
-      - name: Audit dependencies
+      - name: Audit dependencies for known vulnerabilities
         run: cargo audit
+
+  supply-chain:
+    name: cargo deny (bans · sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Official Embark action — bundles a matching cargo-deny, no local install.
+      # `bans`   = reject banned/duplicate crate versions.
+      # `sources` = every dependency must come from a trusted registry/git host.
+      # (Advisories are already covered by the audit job above; licenses are left
+      #  off until we commit a deny.toml allow-list.)
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans sources
