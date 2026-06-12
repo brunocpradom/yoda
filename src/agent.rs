@@ -9,21 +9,24 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use crate::permission::{Action, Decision, Policy};
-use crate::provider::{FunctionCall, Message, Provider, ToolCall};
+use crate::provider::{FunctionCall, Message, Provider, ToolCall, Usage};
 use crate::tools::ToolRegistry;
 
 /// Upper bound on tool round-trips per user turn. Small models sometimes loop;
 /// this guarantees the turn terminates.
 const MAX_STEPS: usize = 8;
 
+/// Run one user turn. Returns the token usage of the turn's last model call
+/// (when the backend reports it) so the caller can show context-window fill.
 pub async fn run_turn(
     provider: &dyn Provider,
     tools: &ToolRegistry,
     policy: &Policy,
     history: &mut Vec<Message>,
-) -> Result<()> {
+) -> Result<Option<Usage>> {
     let specs = tools.specs();
     let turn_start = std::time::Instant::now();
+    let mut last_usage = None;
 
     for step in 0..MAX_STEPS {
         // Animate a Yoda-speak spinner with an elapsed clock while the model
@@ -36,9 +39,10 @@ pub async fn run_turn(
             Ok(c) => c,
             Err(e) => {
                 eprintln!("{}", crate::ui::red(&format!("[error: {e:#}]")));
-                return Ok(());
+                return Ok(last_usage);
             }
         };
+        last_usage = completion.usage.or(last_usage);
 
         // Fallback for models that print tool calls as text instead of using
         // the structured `tool_calls` field (e.g. qwen2.5-coder). If the reply
@@ -75,8 +79,11 @@ pub async fn run_turn(
         ));
 
         if completion.tool_calls.is_empty() {
-            println!("{}", crate::ui::elapsed_line(turn_start.elapsed()));
-            return Ok(()); // model gave a final answer
+            println!(
+                "{}",
+                crate::ui::elapsed_line(turn_start.elapsed(), context_fill(provider, last_usage))
+            );
+            return Ok(last_usage); // model gave a final answer
         }
 
         for call in &completion.tool_calls {
@@ -90,8 +97,17 @@ pub async fn run_turn(
         crate::ui::yoda_label(),
         crate::ui::dim(&format!("[stopped after {MAX_STEPS} tool steps]"))
     );
-    println!("{}", crate::ui::elapsed_line(turn_start.elapsed()));
-    Ok(())
+    println!(
+        "{}",
+        crate::ui::elapsed_line(turn_start.elapsed(), context_fill(provider, last_usage))
+    );
+    Ok(last_usage)
+}
+
+/// `(used, window)` for the elapsed-line context readout — `None` unless both
+/// the backend reported usage and the provider knows its window size.
+fn context_fill(provider: &dyn Provider, usage: Option<Usage>) -> Option<(u64, u64)> {
+    Some((usage?.total(), provider.context_window()? as u64))
 }
 
 /// Run one tool call after vetting it. Returns the text fed back to the model —

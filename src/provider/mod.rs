@@ -9,9 +9,10 @@ pub use ollama::OllamaProvider;
 use anyhow::Result;
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// One turn in the conversation. Shapes match the OpenAI-compatible chat API
-/// that Ollama serves at `/v1/chat/completions`. The same struct is used both
-/// to send history and to parse the model's reply.
+/// One turn in the conversation. Shapes match the OpenAI chat format; the
+/// Ollama provider converts to the native `/api/chat` shape on the way out
+/// (see `to_native_messages`). The same struct is used both to send history
+/// and to parse the model's reply.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
@@ -114,10 +115,29 @@ pub struct ToolFunction {
     pub parameters: serde_json::Value,
 }
 
+/// Token accounting for one exchange, as reported by the backend.
+/// `prompt_tokens` covers everything sent (system prompt, tool specs, the whole
+/// history); `completion_tokens` is what the model generated. Their sum is how
+/// many context-window tokens this conversation occupies right now.
+#[derive(Clone, Copy, Debug)]
+pub struct Usage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+}
+
+impl Usage {
+    /// Context-window tokens occupied after this exchange.
+    pub fn total(self) -> u64 {
+        self.prompt_tokens + self.completion_tokens
+    }
+}
+
 /// A single (non-streaming) model response: final text and/or tool calls.
 pub struct Completion {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
+    /// Token usage for this exchange, when the backend reports it.
+    pub usage: Option<Usage>,
 }
 
 /// A source of model completions.
@@ -125,4 +145,11 @@ pub struct Completion {
 pub trait Provider: Send + Sync {
     /// Send the conversation plus available tools; get back text and/or tool calls.
     async fn complete(&self, messages: &[Message], tools: &[ToolSpec]) -> Result<Completion>;
+
+    /// The context window (in tokens) this provider requests per call, if
+    /// known. Lets the UI turn a raw token count into a "percent full" readout
+    /// without knowing which backend is behind the trait.
+    fn context_window(&self) -> Option<u32> {
+        None
+    }
 }

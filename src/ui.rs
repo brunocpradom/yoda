@@ -162,11 +162,52 @@ pub fn fmt_duration(d: Duration) -> String {
     }
 }
 
-/// A dim-green summary printed after a turn, e.g. `✦ Pondered for 5m 12s`.
-pub fn elapsed_line(d: Duration) -> String {
+/// Format a token count compactly: `742`, `8.1k`, `16.4k`.
+pub fn fmt_tokens(n: u64) -> String {
+    if n >= 1000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Context-window fill as a whole percentage, safe against a zero window.
+pub fn context_percent(used: u64, window: u64) -> u64 {
+    used * 100 / window.max(1)
+}
+
+/// A `[████████░░░░]` meter showing `used` of `window` tokens across `width`
+/// cells. The fill turns yellow at 70% and red at 90% — the same "window is
+/// getting tight" warning Claude Code gives, since on a small local window the
+/// model starts forgetting earlier turns once this overflows.
+pub fn context_bar(used: u64, window: u64, width: usize) -> String {
+    let window = window.max(1);
+    let filled = ((used.min(window) as usize) * width) / window as usize;
+    let bar: String = "█".repeat(filled) + &"░".repeat(width - filled);
+    let code = match context_percent(used, window) {
+        0..=69 => "32",
+        70..=89 => "33",
+        _ => "31",
+    };
+    format!("[{}]", paint(&bar, code))
+}
+
+/// A dim-green summary printed after a turn, e.g.
+/// `✦ Pondered for 5m 12s · context 8.1k/16.4k (49%)`. The context part is
+/// omitted when the backend didn't report token counts.
+pub fn elapsed_line(d: Duration, context: Option<(u64, u64)>) -> String {
     static N: AtomicUsize = AtomicUsize::new(0);
     let verb = DONE_VERBS[N.fetch_add(1, Ordering::Relaxed) % DONE_VERBS.len()];
-    paint(&format!("✦ {verb} for {}", fmt_duration(d)), "2;32")
+    let mut line = format!("✦ {verb} for {}", fmt_duration(d));
+    if let Some((used, window)) = context {
+        line.push_str(&format!(
+            " · context {}/{} ({}%)",
+            fmt_tokens(used),
+            fmt_tokens(window),
+            context_percent(used, window)
+        ));
+    }
+    paint(&line, "2;32")
 }
 
 /// An animated single-line spinner showing a Yoda phrase and elapsed seconds,
@@ -233,5 +274,36 @@ mod tests {
         assert_eq!(fmt_duration(Duration::from_secs(42)), "42s");
         assert_eq!(fmt_duration(Duration::from_secs(3600 + 3 * 60)), "1h 3m");
         assert_eq!(fmt_duration(Duration::from_millis(3400)), "3.4s");
+    }
+
+    #[test]
+    fn formats_token_counts_compactly() {
+        assert_eq!(fmt_tokens(742), "742");
+        assert_eq!(fmt_tokens(8_132), "8.1k");
+        assert_eq!(fmt_tokens(16_384), "16.4k");
+    }
+
+    /// Count fill cells instead of matching the whole string, so the test
+    /// holds with or without ANSI color codes around the bar.
+    fn fill_of(bar: &str) -> (usize, usize) {
+        (bar.matches('█').count(), bar.matches('░').count())
+    }
+
+    #[test]
+    fn context_bar_fills_proportionally() {
+        assert_eq!(fill_of(&context_bar(0, 100, 10)), (0, 10));
+        assert_eq!(fill_of(&context_bar(50, 100, 10)), (5, 5));
+        assert_eq!(fill_of(&context_bar(100, 100, 10)), (10, 0));
+        // Overflow (cache quirks, model overrun) clamps instead of panicking.
+        assert_eq!(fill_of(&context_bar(150, 100, 10)), (10, 0));
+        // A zero window must not divide by zero.
+        assert_eq!(fill_of(&context_bar(0, 0, 10)), (0, 10));
+    }
+
+    #[test]
+    fn context_percent_is_safe_and_exact() {
+        assert_eq!(context_percent(8_192, 16_384), 50);
+        assert_eq!(context_percent(0, 16_384), 0);
+        assert_eq!(context_percent(0, 0), 0); // zero window must not panic
     }
 }

@@ -15,6 +15,11 @@ pub struct Config {
     pub project_dir: PathBuf,
     /// Programs the model may run without asking (subject to no shell chaining).
     pub allowed_commands: Vec<String>,
+    /// Context window (in tokens) requested from the model server per call.
+    /// Ollama defaults to 4096, which is too small for agentic work — the
+    /// system prompt + tool specs + a couple of file reads overflow it and the
+    /// model "forgets" earlier turns (including that it has tools).
+    pub num_ctx: u32,
 }
 
 impl Config {
@@ -27,11 +32,27 @@ impl Config {
         Ok(Self {
             base_url: std::env::var("YODA_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:11434".into()),
-            model: std::env::var("YODA_MODEL").unwrap_or_else(|_| "qwen2.5-coder:7b".into()),
+            model: std::env::var("YODA_MODEL").unwrap_or_else(|_| "qwen3:8b".into()),
             system_prompt: SYSTEM_PROMPT.into(),
             project_dir,
             allowed_commands: load_allowed_commands(),
+            num_ctx: load_num_ctx()?,
         })
+    }
+}
+
+/// Context window per request, overridable with `YODA_NUM_CTX`. 16k is a
+/// deliberate default for agentic use on 16 GB machines: roughly +1.5 GB of
+/// KV cache on a 7–8B model, with enough room that tool specs and file reads
+/// don't push earlier turns out of the window. A malformed override is an
+/// error, not a silent fallback — the user asked for a specific value.
+fn load_num_ctx() -> Result<u32> {
+    match std::env::var("YODA_NUM_CTX") {
+        Ok(v) => v
+            .trim()
+            .parse()
+            .with_context(|| format!("YODA_NUM_CTX must be a positive integer, got {v:?}")),
+        Err(_) => Ok(16384),
     }
 }
 
@@ -53,7 +74,11 @@ const SYSTEM_PROMPT: &str = "You are Yoda, a concise local coding assistant with
 Available tools: read_file, write_file, edit_file, run_bash, glob_files and grep_files \
 (find/search files in the project), web_search (search the web), web_fetch (fetch an \
 http/https URL and read its text), and ask_user (ask the user a question). IMPORTANT: you \
-DO have internet access. When the user asks you to search the web, find or look something up, \
+DO have filesystem access through your tools. When the user asks you to look at, summarize, \
+explore, or review a repository, directory, or file, CALL the tools RIGHT AWAY — start with \
+glob_files or run_bash with ls to see the structure, then read_file the relevant files. \
+Never reply that you cannot access files or that the user must paste file contents. \
+IMPORTANT: you also DO have internet access. When the user asks you to search the web, find or look something up, \
 or asks about current/online information, CALL web_search RIGHT AWAY — do not ask what they \
 want and do not answer from memory. Use web_fetch to read a specific page. Never reply that you \
 cannot access the internet. Only call ask_user when the request is genuinely ambiguous; a clear \
