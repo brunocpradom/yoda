@@ -4,7 +4,7 @@
 
 use std::io::{self, Write};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use yoda::config::Config;
 use yoda::permission::{Mode, Policy};
@@ -197,6 +197,13 @@ fn handle_command(input: &str, ctx: CommandCtx<'_>) -> bool {
         }
         "status" => print_status(cfg, provider, policy, history, last_usage),
         "context" => print_context(cfg, provider, tools, history, last_usage),
+        "copy" => match last_assistant_reply(history) {
+            Some(text) => match clipboard_copy(text) {
+                Ok(()) => println!("(copied {} chars to clipboard)\n", text.chars().count()),
+                Err(e) => println!("copy failed: {e}\n"),
+            },
+            None => println!("(nothing to copy — no assistant reply yet)\n"),
+        },
         other => println!("unknown command /{other}. Try /help\n"),
     }
     false
@@ -306,6 +313,41 @@ fn print_context(
     println!();
 }
 
+/// The text of the most recent assistant reply, straight from history. This is
+/// the un-wrapped original — copying from here (rather than selecting terminal
+/// output) is what keeps the terminal's visual line breaks out of the paste.
+/// Skips assistant turns that carried only tool calls (no text).
+fn last_assistant_reply(history: &[Message]) -> Option<&str> {
+    history
+        .iter()
+        .rev()
+        .filter(|m| m.role == "assistant")
+        .find_map(|m| {
+            m.content
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+        })
+}
+
+/// Put `text` on the macOS clipboard by piping it to `pbcopy`.
+fn clipboard_copy(text: &str) -> Result<()> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("could not run pbcopy (is this macOS?)")?;
+    child
+        .stdin
+        .take()
+        .expect("stdin was requested as piped above")
+        .write_all(text.as_bytes())
+        .context("could not write to pbcopy")?;
+    let status = child.wait().context("pbcopy did not exit")?;
+    anyhow::ensure!(status.success(), "pbcopy exited with {status}");
+    Ok(())
+}
+
 fn print_help() {
     println!(
         "commands:\n  \
@@ -314,6 +356,7 @@ fn print_help() {
          /mode [name]       permission mode: normal | auto | read-only\n  \
          /status            session at a glance: model, mode, work dir, context\n  \
          /context           visualize context-window usage\n  \
+         /copy              copy the last reply to the clipboard (no wrap artifacts)\n  \
          /skills            list available skills\n  \
          /skill <name>      activate a skill (inject its instructions)\n  \
          /save [name]       save the conversation (default: 'default')\n  \
@@ -322,4 +365,49 @@ fn print_help() {
          /reset             clear history (keep system prompt)\n  \
          /quit, /exit       leave\n"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yoda::provider::{FunctionCall, ToolCall};
+
+    fn call() -> ToolCall {
+        ToolCall {
+            id: "call_1".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn copy_finds_the_last_textual_reply() {
+        let history = vec![
+            Message::system("sys"),
+            Message::user("hi"),
+            Message::assistant(Some("first answer".into()), vec![]),
+            Message::user("again"),
+            Message::assistant(Some("  second answer\n".into()), vec![]),
+        ];
+        assert_eq!(last_assistant_reply(&history), Some("second answer"));
+    }
+
+    #[test]
+    fn copy_skips_tool_call_only_turns() {
+        let history = vec![
+            Message::assistant(Some("real text".into()), vec![]),
+            Message::assistant(None, vec![call()]),
+            Message::assistant(Some("   ".into()), vec![]),
+        ];
+        assert_eq!(last_assistant_reply(&history), Some("real text"));
+    }
+
+    #[test]
+    fn copy_handles_an_empty_session() {
+        assert_eq!(last_assistant_reply(&[Message::system("sys")]), None);
+        assert_eq!(last_assistant_reply(&[]), None);
+    }
 }
