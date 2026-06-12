@@ -23,6 +23,10 @@ async fn main() -> Result<()> {
     let sessions_dir = session::sessions_dir();
     let skills = skill::load_all(&skill::skills_dir());
 
+    // Reserve the bottom row before anything else is printed: install scrolls
+    // the screen into the scrollback, so output from here on starts clean.
+    let mut status_bar = ui::StatusBar::install();
+
     let skill_names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
     ui::banner(
         &cfg.model,
@@ -34,11 +38,15 @@ async fn main() -> Result<()> {
     );
 
     let mut history = vec![Message::system(&cfg.system_prompt)];
-    // Token usage of the most recent model call — what /status and /context
-    // report. None until the first request (nothing measured yet).
+    // Token usage of the most recent model call — what /status, /context and
+    // the status bar report. None until the first request (nothing measured
+    // yet).
     let mut last_usage: Option<Usage> = None;
+    let workdir = ui::tilde(&cfg.project_dir.display().to_string());
 
     loop {
+        let context = last_usage.map(|u| (u.total(), cfg.num_ctx as u64));
+        status_bar.draw(&workdir, context);
         print!("{}", ui::mode_prompt(policy.mode().label()));
         io::stdout().flush()?;
 
@@ -73,6 +81,7 @@ async fn main() -> Result<()> {
         last_usage = turn_usage.or(last_usage);
     }
 
+    status_bar.remove();
     println!("{}", ui::green("May the Force be with you."));
     Ok(())
 }

@@ -1788,6 +1788,7 @@ dependencies = [
  "async-trait",
  "glob",
  "html2text",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
