@@ -8,7 +8,7 @@ the architecture and rationale.
 
 - Rust (edition 2024)
 - [Ollama](https://ollama.com) running locally (`ollama serve`)
-- A pulled model, e.g. `ollama pull qwen3:8b` (the default)
+- A pulled model, e.g. `ollama pull qwen3:14b` (the default)
 
 ## Run
 
@@ -35,7 +35,7 @@ Configuration via environment variables:
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `YODA_MODEL` | `qwen3:8b` | Ollama model to use |
+| `YODA_MODEL` | `qwen3:14b` | Ollama model to use |
 | `YODA_BASE_URL` | `http://localhost:11434` | OpenAI-compatible endpoint |
 | `YODA_ALLOWED_COMMANDS` | safe read-only set | comma-separated programs `run_bash` may run without asking (the default excludes code-executors like `cargo`/`git`/`find` and file-dumpers like `cat`/`grep` — those prompt) |
 | `YODA_ALLOW_LOCAL_FETCH` | unset | set to `1` to let `web_fetch` reach `localhost`/private/loopback addresses (off by default to block SSRF) |
