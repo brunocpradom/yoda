@@ -29,11 +29,28 @@ pub async fn run_turn(
     let mut last_usage = None;
 
     for step in 0..MAX_STEPS {
-        // Animate a Yoda-speak spinner with an elapsed clock while the model
-        // (which may take many seconds locally) produces its reply.
-        let spinner = crate::ui::Spinner::start(crate::ui::thinking_phrase());
-        let result = provider.complete(history, &specs).await;
-        spinner.stop();
+        // Animate a Yoda-speak spinner with an elapsed clock until the model's
+        // first token arrives (which may be many seconds locally). When thinking
+        // is on, the model's reasoning then streams in live — dimmed, under a
+        // `thinking ▸` label — so the user watches it form instead of waiting for
+        // the whole block. The reasoning is shown but never stored in history.
+        let mut spinner = Some(crate::ui::Spinner::start(crate::ui::thinking_phrase()));
+        let mut streaming_thinking = false;
+        let mut on_thinking = |delta: &str| {
+            if !streaming_thinking {
+                spinner.take(); // drop → stop the spinner thread and clear its line
+                print!("{} ", crate::ui::thinking_label());
+                streaming_thinking = true;
+            }
+            print!("{}", crate::ui::dim(delta));
+            let _ = io::stdout().flush();
+        };
+        let result = provider.complete(history, &specs, &mut on_thinking).await;
+        drop(on_thinking); // release the borrows on `spinner` / `streaming_thinking`
+        spinner.take(); // stop the spinner if no reasoning streamed (thinking off / non-reasoning model)
+        if streaming_thinking {
+            println!("\n"); // terminate the live thinking line and leave a blank line before the answer
+        }
 
         let mut completion = match result {
             Ok(c) => c,
@@ -43,19 +60,6 @@ pub async fn run_turn(
             }
         };
         last_usage = completion.usage.or(last_usage);
-
-        // Surface the model's reasoning (dimmed) when thinking is on and the
-        // model is reasoning-capable. Shown but never stored in history.
-        if let Some(thinking) = &completion.thinking {
-            let trimmed = thinking.trim();
-            if !trimmed.is_empty() {
-                println!(
-                    "{} {}\n",
-                    crate::ui::thinking_label(),
-                    crate::ui::dim(trimmed)
-                );
-            }
-        }
 
         // Fallback for models that print tool calls as text instead of using
         // the structured `tool_calls` field (e.g. qwen2.5-coder). If the reply

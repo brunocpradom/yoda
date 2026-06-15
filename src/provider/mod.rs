@@ -142,11 +142,14 @@ impl Usage {
     }
 }
 
-/// A single (non-streaming) model response: final text and/or tool calls.
+/// A fully-assembled model response: final text and/or tool calls. The provider
+/// streams the reply internally (pushing reasoning deltas to `on_thinking` as
+/// they arrive) and returns this once the stream completes.
 pub struct Completion {
     pub content: Option<String>,
-    /// The model's reasoning trace, when thinking is on and supported. Shown to
-    /// the user (dimmed) but not stored in history.
+    /// The full reasoning trace, when thinking is on and supported. Streamed to
+    /// the user live during generation, then returned here whole; not stored in
+    /// history.
     pub thinking: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     /// Token usage for this exchange, when the backend reports it.
@@ -154,10 +157,23 @@ pub struct Completion {
 }
 
 /// A source of model completions.
-#[async_trait::async_trait]
+///
+/// `?Send`: the returned future is not required to be `Send`. The agent loop
+/// awaits it directly on the main task (never `tokio::spawn`s it), and this lets
+/// `complete` take a non-`Send` `on_thinking` sink that borrows the caller's
+/// terminal/spinner state for live streaming.
+#[async_trait::async_trait(?Send)]
 pub trait Provider: Send + Sync {
-    /// Send the conversation plus available tools; get back text and/or tool calls.
-    async fn complete(&self, messages: &[Message], tools: &[ToolSpec]) -> Result<Completion>;
+    /// Send the conversation plus available tools; get back text and/or tool
+    /// calls. `on_thinking` is invoked with each reasoning-trace delta as it
+    /// streams in, so the caller can render the model's thinking live; it is
+    /// never called for non-reasoning models or when thinking is off.
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        on_thinking: &mut dyn for<'a> FnMut(&'a str),
+    ) -> Result<Completion>;
 
     /// The context window (in tokens) this provider requests per call, if
     /// known. Lets the UI turn a raw token count into a "percent full" readout

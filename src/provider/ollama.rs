@@ -9,6 +9,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, anyhow};
+use futures_util::StreamExt;
 use serde::Deserialize;
 
 use super::{Completion, Message, Provider, ToolSpec, Usage};
@@ -64,17 +65,35 @@ impl OllamaProvider {
     }
 }
 
+/// One newline-delimited JSON object from Ollama's streamed `/api/chat`
+/// response. Each chunk carries a *delta* (a few tokens of `content` and/or
+/// `thinking`); the final chunk has `done: true` and the token counts.
 #[derive(Deserialize)]
-struct ChatResponse {
-    message: Message,
-    /// Prompt / generated token counts, reported by Ollama on the final
-    /// (non-streamed) response. `Option` because error shapes omit them — and
-    /// note `prompt_eval_count` counts tokens *evaluated*, so a warm prompt
-    /// cache can make it undercount the true context occupancy.
+struct StreamChunk {
+    #[serde(default)]
+    message: Option<StreamMessage>,
+    #[serde(default)]
+    done: bool,
+    /// Prompt / generated token counts, reported only on the final (`done`)
+    /// chunk. `Option` because non-final chunks omit them — and note
+    /// `prompt_eval_count` counts tokens *evaluated*, so a warm prompt cache can
+    /// make it undercount the true context occupancy.
     #[serde(default)]
     prompt_eval_count: Option<u64>,
     #[serde(default)]
     eval_count: Option<u64>,
+}
+
+/// The per-chunk message delta. `content`/`thinking` are appended across chunks;
+/// `tool_calls`, when present, arrive whole rather than as deltas.
+#[derive(Deserialize)]
+struct StreamMessage {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<super::ToolCall>>,
 }
 
 /// Convert our internal (OpenAI-shaped) messages to the native API's shape.
@@ -102,9 +121,14 @@ fn to_native_messages(messages: &[Message]) -> Result<serde_json::Value> {
     Ok(out)
 }
 
-#[async_trait::async_trait]
+#[async_trait::async_trait(?Send)]
 impl Provider for OllamaProvider {
-    async fn complete(&self, messages: &[Message], tools: &[ToolSpec]) -> Result<Completion> {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        on_thinking: &mut dyn for<'a> FnMut(&'a str),
+    ) -> Result<Completion> {
         let native = to_native_messages(messages)?;
         let tools_value = if tools.is_empty() {
             None
@@ -123,7 +147,7 @@ impl Provider for OllamaProvider {
             let mut body = serde_json::Map::new();
             body.insert("model".into(), serde_json::json!(self.model));
             body.insert("messages".into(), native.clone());
-            body.insert("stream".into(), serde_json::json!(false));
+            body.insert("stream".into(), serde_json::json!(true));
             body.insert(
                 "options".into(),
                 serde_json::json!({ "num_ctx": self.num_ctx }),
@@ -159,22 +183,57 @@ impl Provider for OllamaProvider {
                     .context("is the model pulled?"));
             }
 
-            let parsed: ChatResponse = response
-                .json()
-                .await
-                .context("could not parse model response")?;
+            // Consume the newline-delimited JSON stream, appending content and
+            // thinking deltas as they arrive. Each chunk is its own JSON object
+            // terminated by '\n'; chunks can be split across TCP reads, so we
+            // buffer bytes and only parse once a full line is available. Thinking
+            // deltas are pushed to `on_thinking` so the caller renders them live.
+            let mut stream = response.bytes_stream();
+            let mut buf: Vec<u8> = Vec::new();
+            let mut content = String::new();
+            let mut thinking = String::new();
+            let mut tool_calls: Vec<super::ToolCall> = Vec::new();
+            let mut usage = None;
 
-            // No prompt count → no usage at all: a total built from only one of
-            // the two numbers would be silently wrong, worse than absent.
-            let usage = parsed.prompt_eval_count.map(|prompt_tokens| Usage {
-                prompt_tokens,
-                completion_tokens: parsed.eval_count.unwrap_or(0),
-            });
+            while let Some(chunk) = stream.next().await {
+                let bytes = chunk.context("error reading model response stream")?;
+                buf.extend_from_slice(&bytes);
+
+                while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+                    let line: Vec<u8> = buf.drain(..=nl).collect();
+                    let line = &line[..line.len() - 1]; // drop the trailing '\n'
+                    if line.iter().all(u8::is_ascii_whitespace) {
+                        continue;
+                    }
+                    let parsed: StreamChunk = serde_json::from_slice(line)
+                        .context("could not parse a model response chunk")?;
+                    if let Some(msg) = parsed.message {
+                        if let Some(t) = msg.thinking.filter(|t| !t.is_empty()) {
+                            on_thinking(&t);
+                            thinking.push_str(&t);
+                        }
+                        if let Some(c) = msg.content {
+                            content.push_str(&c);
+                        }
+                        if let Some(calls) = msg.tool_calls {
+                            tool_calls.extend(calls);
+                        }
+                    }
+                    // No prompt count → no usage at all: a total built from only
+                    // one of the two numbers would be silently wrong.
+                    if parsed.done && let Some(prompt_tokens) = parsed.prompt_eval_count {
+                        usage = Some(Usage {
+                            prompt_tokens,
+                            completion_tokens: parsed.eval_count.unwrap_or(0),
+                        });
+                    }
+                }
+            }
 
             return Ok(Completion {
-                content: parsed.message.content,
-                thinking: parsed.message.thinking,
-                tool_calls: parsed.message.tool_calls.unwrap_or_default(),
+                content: (!content.is_empty()).then_some(content),
+                thinking: (!thinking.is_empty()).then_some(thinking),
+                tool_calls,
                 usage,
             });
         }
@@ -231,21 +290,24 @@ mod tests {
     }
 
     #[test]
-    fn parses_token_counts_from_chat_response() {
+    fn parses_token_counts_from_final_chunk() {
         let json = r#"{
-            "message": {"role": "assistant", "content": "hi"},
+            "message": {"role": "assistant", "content": ""},
+            "done": true,
             "prompt_eval_count": 26,
             "eval_count": 298
         }"#;
-        let parsed: ChatResponse = serde_json::from_str(json).unwrap();
+        let parsed: StreamChunk = serde_json::from_str(json).unwrap();
+        assert!(parsed.done);
         assert_eq!(parsed.prompt_eval_count, Some(26));
         assert_eq!(parsed.eval_count, Some(298));
     }
 
     #[test]
-    fn token_counts_are_optional() {
-        let json = r#"{"message": {"role": "assistant", "content": "hi"}}"#;
-        let parsed: ChatResponse = serde_json::from_str(json).unwrap();
+    fn token_counts_absent_on_non_final_chunk() {
+        let json = r#"{"message": {"role": "assistant", "content": "hi"}, "done": false}"#;
+        let parsed: StreamChunk = serde_json::from_str(json).unwrap();
+        assert!(!parsed.done);
         assert_eq!(parsed.prompt_eval_count, None);
         assert_eq!(parsed.eval_count, None);
     }
@@ -270,14 +332,12 @@ mod tests {
     }
 
     #[test]
-    fn thinking_parsed_from_response() {
-        let json = r#"{
-            "message": {"role": "assistant", "content": "391", "thinking": "17*23 = 340+51"},
-            "prompt_eval_count": 10,
-            "eval_count": 5
-        }"#;
-        let parsed: ChatResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(parsed.message.thinking.as_deref(), Some("17*23 = 340+51"));
-        assert_eq!(parsed.message.content.as_deref(), Some("391"));
+    fn thinking_delta_parsed_from_stream_chunk() {
+        let json =
+            r#"{"message": {"role": "assistant", "content": "391", "thinking": "17*23"}, "done": false}"#;
+        let parsed: StreamChunk = serde_json::from_str(json).unwrap();
+        let msg = parsed.message.unwrap();
+        assert_eq!(msg.thinking.as_deref(), Some("17*23"));
+        assert_eq!(msg.content.as_deref(), Some("391"));
     }
 }

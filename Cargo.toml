@@ -6,10 +6,11 @@ description = "A local-first, model-agnostic agentic harness driven by open-sour
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"
+futures-util = "0.3"
 anyhow = "1"
 glob = "0.3"
 html2text = "0.17"
