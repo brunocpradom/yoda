@@ -221,7 +221,9 @@ impl Provider for OllamaProvider {
                     }
                     // No prompt count → no usage at all: a total built from only
                     // one of the two numbers would be silently wrong.
-                    if parsed.done && let Some(prompt_tokens) = parsed.prompt_eval_count {
+                    if parsed.done
+                        && let Some(prompt_tokens) = parsed.prompt_eval_count
+                    {
                         usage = Some(Usage {
                             prompt_tokens,
                             completion_tokens: parsed.eval_count.unwrap_or(0),
@@ -333,8 +335,7 @@ mod tests {
 
     #[test]
     fn thinking_delta_parsed_from_stream_chunk() {
-        let json =
-            r#"{"message": {"role": "assistant", "content": "391", "thinking": "17*23"}, "done": false}"#;
+        let json = r#"{"message": {"role": "assistant", "content": "391", "thinking": "17*23"}, "done": false}"#;
         let parsed: StreamChunk = serde_json::from_str(json).unwrap();
         let msg = parsed.message.unwrap();
         assert_eq!(msg.thinking.as_deref(), Some("17*23"));

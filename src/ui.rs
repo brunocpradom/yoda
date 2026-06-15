@@ -4,6 +4,7 @@
 //! Everything degrades gracefully: when stdout is not a TTY (e.g. piped) or
 //! `NO_COLOR` is set, colors are dropped and the spinner doesn't animate.
 
+use std::collections::VecDeque;
 use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -416,6 +417,153 @@ impl Drop for Spinner {
     }
 }
 
+// --- thinking pane ------------------------------------------------------------
+
+/// How many lines of reasoning the live pane shows at once.
+const THINKING_WINDOW: usize = 7;
+
+/// A bounded, self-erasing viewport for the model's reasoning. As thinking
+/// streams in, it shows the most recent [`THINKING_WINDOW`] lines under a
+/// `thinking ▸` header, scrolling older lines off the top; on [`finish`] the
+/// whole block is deleted so only the final answer remains in the scrollback.
+///
+/// On a TTY it redraws in place with cursor-up + clear-line and tears down with
+/// DL (`ESC[nM`, delete-line) — which respects the status bar's scroll region,
+/// so the reserved bottom row is never touched. With no TTY (piped/`NO_COLOR`)
+/// it degrades to plain inline printing, which stays readable in logs.
+///
+/// [`finish`]: ThinkingPane::finish
+pub struct ThinkingPane {
+    active: bool,
+    /// Max printable chars per row; lines longer than this are hard-wrapped so
+    /// each logical row occupies exactly one physical terminal row (keeping the
+    /// redraw line-count exact).
+    width: usize,
+    /// Completed rows, capped at the window size — older rows are dropped.
+    rows: VecDeque<String>,
+    /// The in-progress row (no newline seen yet); shown as the last visible line.
+    current: String,
+    /// Physical rows the pane currently occupies on screen (header + body).
+    drawn: usize,
+    /// Inactive-mode only: whether the `thinking ▸` label was already printed.
+    label_printed: bool,
+}
+
+impl ThinkingPane {
+    pub fn new() -> Self {
+        let width = term_size()
+            .map(|(_, cols)| (cols as usize).saturating_sub(1).max(20))
+            .unwrap_or(80);
+        Self {
+            active: color_enabled(),
+            width,
+            rows: VecDeque::new(),
+            current: String::new(),
+            drawn: 0,
+            label_printed: false,
+        }
+    }
+
+    /// Feed a chunk of reasoning text; updates the live view.
+    pub fn push(&mut self, delta: &str) {
+        if !self.active {
+            if !self.label_printed {
+                print!("{} ", thinking_label());
+                self.label_printed = true;
+            }
+            print!("{}", dim(delta));
+            let _ = std::io::stdout().flush();
+            return;
+        }
+        for ch in delta.chars() {
+            match ch {
+                '\r' => {}
+                '\n' => self.commit_row(),
+                _ => {
+                    self.current.push(ch);
+                    if self.current.chars().count() >= self.width {
+                        self.commit_row();
+                    }
+                }
+            }
+        }
+        self.render();
+    }
+
+    /// Erase the pane entirely, leaving the cursor where the block began so the
+    /// answer prints in its place.
+    pub fn finish(&mut self) {
+        if !self.active {
+            if self.label_printed {
+                println!("\n");
+            }
+            return;
+        }
+        if self.drawn == 0 {
+            return;
+        }
+        let mut out = String::new();
+        if self.drawn > 1 {
+            out.push_str(&format!("\x1b[{}A", self.drawn - 1)); // up to the first block row
+        }
+        out.push('\r');
+        out.push_str(&format!("\x1b[{}M", self.drawn)); // delete the block's rows (scrolls region up)
+        print!("{out}");
+        let _ = std::io::stdout().flush();
+        self.drawn = 0;
+    }
+
+    fn commit_row(&mut self) {
+        self.rows.push_back(std::mem::take(&mut self.current));
+        while self.rows.len() > THINKING_WINDOW {
+            self.rows.pop_front();
+        }
+    }
+
+    /// The styled lines to show: the `thinking ▸` header plus the last
+    /// `THINKING_WINDOW` body rows (completed rows, then the in-progress one).
+    fn visible(&self) -> Vec<String> {
+        let mut body: Vec<&str> = self.rows.iter().map(String::as_str).collect();
+        if !self.current.is_empty() || body.is_empty() {
+            body.push(&self.current);
+        }
+        let start = body.len().saturating_sub(THINKING_WINDOW);
+        let mut out = Vec::with_capacity(body.len() - start + 1);
+        out.push(thinking_label());
+        out.extend(body[start..].iter().map(|line| dim(line)));
+        out
+    }
+
+    /// Redraw the block in place: jump to its first row, then clear-and-rewrite
+    /// each line. Lines are separated by `\r\n` but the block ends with no
+    /// trailing newline, so a stable redraw never scrolls the screen; only
+    /// growth (a newly added row) advances the cursor and scrolls if needed.
+    fn render(&mut self) {
+        let lines = self.visible();
+        let mut out = String::new();
+        if self.drawn > 1 {
+            out.push_str(&format!("\x1b[{}A", self.drawn - 1));
+        }
+        out.push('\r');
+        for (i, line) in lines.iter().enumerate() {
+            out.push_str("\x1b[2K"); // clear the whole row before rewriting
+            out.push_str(line);
+            if i + 1 < lines.len() {
+                out.push_str("\r\n");
+            }
+        }
+        self.drawn = lines.len();
+        print!("{out}");
+        let _ = std::io::stdout().flush();
+    }
+}
+
+impl Default for ThinkingPane {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +654,52 @@ mod tests {
         assert_eq!(context_percent(8_192, 16_384), 50);
         assert_eq!(context_percent(0, 16_384), 0);
         assert_eq!(context_percent(0, 0), 0); // zero window must not panic
+    }
+
+    /// A pane wired for logic tests: active (so it buffers rows) with a fixed
+    /// wrap width, independent of the real terminal. Color is off under `cargo
+    /// test`, so `visible()` returns plain text we can assert on directly.
+    fn test_pane(width: usize) -> ThinkingPane {
+        ThinkingPane {
+            active: true,
+            width,
+            rows: VecDeque::new(),
+            current: String::new(),
+            drawn: 0,
+            label_printed: false,
+        }
+    }
+
+    #[test]
+    fn thinking_pane_keeps_only_the_last_window_of_lines() {
+        let mut p = test_pane(100);
+        for i in 1..=10 {
+            p.push(&format!("line {i}\n"));
+        }
+        let visible = p.visible();
+        // Header + exactly THINKING_WINDOW body rows, showing the most recent.
+        assert_eq!(visible[0], thinking_label());
+        assert_eq!(visible.len(), THINKING_WINDOW + 1);
+        assert_eq!(visible[1], "line 4");
+        assert_eq!(visible.last().unwrap(), "line 10");
+    }
+
+    #[test]
+    fn thinking_pane_shows_the_in_progress_line_last() {
+        let mut p = test_pane(100);
+        p.push("done line\n");
+        p.push("partial");
+        let visible = p.visible();
+        assert_eq!(visible.last().unwrap(), "partial");
+    }
+
+    #[test]
+    fn thinking_pane_hard_wraps_overlong_lines_to_width() {
+        let mut p = test_pane(10);
+        p.push("0123456789ABCDE"); // 15 chars, wraps at 10
+        let visible = p.visible();
+        // First 10 chars become a committed row; the rest is the live tail.
+        assert!(visible.iter().any(|l| l == "0123456789"));
+        assert_eq!(visible.last().unwrap(), "ABCDE");
     }
 }

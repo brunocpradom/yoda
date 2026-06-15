@@ -35,21 +35,23 @@ pub async fn run_turn(
         // `thinking ▸` label — so the user watches it form instead of waiting for
         // the whole block. The reasoning is shown but never stored in history.
         let mut spinner = Some(crate::ui::Spinner::start(crate::ui::thinking_phrase()));
-        let mut streaming_thinking = false;
-        let mut on_thinking = |delta: &str| {
-            if !streaming_thinking {
-                spinner.take(); // drop → stop the spinner thread and clear its line
-                print!("{} ", crate::ui::thinking_label());
-                streaming_thinking = true;
-            }
-            print!("{}", crate::ui::dim(delta));
-            let _ = io::stdout().flush();
+        let mut pane: Option<crate::ui::ThinkingPane> = None;
+        // Scope the sink so its borrows on `spinner`/`pane` end before we touch
+        // them again below.
+        let result = {
+            let mut on_thinking = |delta: &str| {
+                // First reasoning token: tear down the spinner, open the live pane.
+                pane.get_or_insert_with(|| {
+                    spinner.take(); // drop → stop the spinner thread and clear its line
+                    crate::ui::ThinkingPane::new()
+                })
+                .push(delta);
+            };
+            provider.complete(history, &specs, &mut on_thinking).await
         };
-        let result = provider.complete(history, &specs, &mut on_thinking).await;
-        drop(on_thinking); // release the borrows on `spinner` / `streaming_thinking`
         spinner.take(); // stop the spinner if no reasoning streamed (thinking off / non-reasoning model)
-        if streaming_thinking {
-            println!("\n"); // terminate the live thinking line and leave a blank line before the answer
+        if let Some(mut pane) = pane.take() {
+            pane.finish(); // erase the live thinking window before the answer prints
         }
 
         let mut completion = match result {
