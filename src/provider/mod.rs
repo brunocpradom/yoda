@@ -18,6 +18,12 @@ pub struct Message {
     pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// The model's reasoning trace, when it is a thinking-capable model and
+    /// thinking is requested. Only populated when *parsing* a response — our
+    /// outgoing history never sets it (skipped when None), so reasoning is shown
+    /// to the user but not fed back into the next prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -29,6 +35,7 @@ impl Message {
         Self {
             role: "system".into(),
             content: Some(content.into()),
+            thinking: None,
             tool_calls: None,
             tool_call_id: None,
         }
@@ -37,6 +44,7 @@ impl Message {
         Self {
             role: "user".into(),
             content: Some(content.into()),
+            thinking: None,
             tool_calls: None,
             tool_call_id: None,
         }
@@ -46,6 +54,7 @@ impl Message {
         Self {
             role: "assistant".into(),
             content,
+            thinking: None,
             tool_calls: if tool_calls.is_empty() {
                 None
             } else {
@@ -59,6 +68,7 @@ impl Message {
         Self {
             role: "tool".into(),
             content: Some(content),
+            thinking: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id),
         }
@@ -135,6 +145,9 @@ impl Usage {
 /// A single (non-streaming) model response: final text and/or tool calls.
 pub struct Completion {
     pub content: Option<String>,
+    /// The model's reasoning trace, when thinking is on and supported. Shown to
+    /// the user (dimmed) but not stored in history.
+    pub thinking: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     /// Token usage for this exchange, when the backend reports it.
     pub usage: Option<Usage>,

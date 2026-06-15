@@ -55,6 +55,11 @@ pub fn yoda_label() -> String {
     paint("yoda ▸", "1;32")
 }
 
+/// The `thinking ▸` label for a model's reasoning trace (dim, italic).
+pub fn thinking_label() -> String {
+    paint("thinking ▸", "2;3")
+}
+
 pub fn bold_red(s: &str) -> String {
     paint(s, "1;31")
 }

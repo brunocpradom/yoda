@@ -44,6 +44,19 @@ pub async fn run_turn(
         };
         last_usage = completion.usage.or(last_usage);
 
+        // Surface the model's reasoning (dimmed) when thinking is on and the
+        // model is reasoning-capable. Shown but never stored in history.
+        if let Some(thinking) = &completion.thinking {
+            let trimmed = thinking.trim();
+            if !trimmed.is_empty() {
+                println!(
+                    "{} {}\n",
+                    crate::ui::thinking_label(),
+                    crate::ui::dim(trimmed)
+                );
+            }
+        }
+
         // Fallback for models that print tool calls as text instead of using
         // the structured `tool_calls` field (e.g. qwen2.5-coder). If the reply
         // has no native tool calls but its text contains tool-call JSON for a

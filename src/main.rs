@@ -204,6 +204,21 @@ fn handle_command(input: &str, ctx: CommandCtx<'_>) -> bool {
                 }
             }
         }
+        "think" => match arg {
+            "" => println!(
+                "thinking: {} (usage: /think on|off)\n",
+                if provider.think() { "on" } else { "off" }
+            ),
+            "on" => {
+                provider.set_think(true);
+                println!("(thinking → on — reasoning models will show their work)\n");
+            }
+            "off" => {
+                provider.set_think(false);
+                println!("(thinking → off)\n");
+            }
+            _ => println!("usage: /think on|off\n"),
+        },
         "status" => print_status(cfg, provider, policy, history, last_usage),
         "context" => print_context(cfg, provider, tools, history, last_usage),
         "copy" => match last_assistant_reply(history) {
@@ -363,6 +378,7 @@ fn print_help() {
          /help              show this help\n  \
          /model [name]      show or switch the active model\n  \
          /mode [name]       permission mode: normal | auto | read-only\n  \
+         /think [on|off]    show or toggle the model's reasoning (on by default)\n  \
          /status            session at a glance: model, mode, work dir, context\n  \
          /context           visualize context-window usage\n  \
          /copy              copy the last reply to the clipboard (no wrap artifacts)\n  \
