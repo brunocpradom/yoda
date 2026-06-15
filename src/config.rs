@@ -32,7 +32,7 @@ impl Config {
         Ok(Self {
             base_url: std::env::var("YODA_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:11434".into()),
-            model: std::env::var("YODA_MODEL").unwrap_or_else(|_| "qwen3:14b".into()),
+            model: std::env::var("YODA_MODEL").unwrap_or_else(|_| "qwen3:8b".into()),
             system_prompt: SYSTEM_PROMPT.into(),
             project_dir,
             allowed_commands: load_allowed_commands(),
