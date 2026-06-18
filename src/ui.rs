@@ -46,9 +46,38 @@ pub fn red(s: &str) -> String {
     paint(s, "31")
 }
 
-/// The `you ▸ ` input prompt (cyan, bold).
-pub fn user_prompt() -> String {
-    paint("you ▸ ", "1;36")
+/// Plain (uncolored) input prompt for the current permission mode. It must
+/// carry no ANSI escapes: the line editor (rustyline) measures the prompt's
+/// display width to place the cursor, and counting escape bytes would push it
+/// off. Color is applied separately by [`color_prompt`] via the editor's
+/// highlighter, so width stays correct while the prompt still shows in color.
+pub fn prompt_text(mode: &str) -> &'static str {
+    match mode {
+        "auto" => "you (auto) ▸ ",
+        "read-only" => "you (read-only) ▸ ",
+        _ => "you ▸ ",
+    }
+}
+
+/// Colorize a plain prompt from [`prompt_text`]: cyan normally, bold red in
+/// `auto` (everything is auto-approved — make it loud), yellow in `read-only`.
+/// Kept beside `prompt_text` so the text and its color never drift apart.
+/// Honors `NO_COLOR`/non-TTY through [`paint`].
+pub fn color_prompt(plain: &str) -> String {
+    let code = if plain.contains("(auto)") {
+        "1;31"
+    } else if plain.contains("(read-only)") {
+        "33"
+    } else {
+        "1;36"
+    };
+    paint(plain, code)
+}
+
+/// Whether ANSI color is on (stdout is a TTY and `NO_COLOR` is unset). Public so
+/// the line editor can match its color mode to the rest of the UI.
+pub fn colors_enabled() -> bool {
+    color_enabled()
 }
 
 /// The `yoda ▸` reply label (green, bold).
@@ -73,17 +102,6 @@ pub fn ask_label() -> String {
 /// The `↳ ` prompt where the user types an answer to `ask_user` (bold cyan).
 pub fn answer_prompt() -> String {
     paint("  ↳ ", "1;36")
-}
-
-/// The input prompt for the current permission mode. `normal` shows the plain
-/// cyan prompt; `auto`/`read-only` are flagged so you always know when risky
-/// actions are being auto-approved (or all mutations blocked).
-pub fn mode_prompt(mode: &str) -> String {
-    match mode {
-        "auto" => bold_red("you (auto) ▸ "),
-        "read-only" => yellow("you (read-only) ▸ "),
-        _ => user_prompt(),
-    }
 }
 
 // --- banner -------------------------------------------------------------------
