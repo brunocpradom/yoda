@@ -79,7 +79,7 @@ impl ToolRegistry {
 }
 
 pub fn default_registry(project_dir: PathBuf) -> ToolRegistry {
-    ToolRegistry {
+    let mut registry = ToolRegistry {
         tools: vec![
             Box::new(ReadFile),
             Box::new(WriteFile),
@@ -95,7 +95,13 @@ pub fn default_registry(project_dir: PathBuf) -> ToolRegistry {
             Box::new(WebSearch),
             Box::new(AskUser),
         ],
+    };
+    // Gmail tools join only when Gmail is configured, so an unconfigured setup
+    // keeps the tool set small (local models choose poorly with many tools).
+    for tool in crate::gmail::tools() {
+        registry.push(tool);
     }
+    registry
 }
 
 // --- helpers ---

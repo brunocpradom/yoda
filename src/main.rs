@@ -37,6 +37,13 @@ impl Highlighter for PromptHelper {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // One-shot subcommand: `yoda gmail-login` runs the interactive Gmail OAuth
+    // flow (opens a browser) and exits, so the headless daemon can later run off
+    // the cached refresh token. Everything else falls through to the REPL.
+    if std::env::args().nth(1).as_deref() == Some("gmail-login") {
+        return yoda::gmail::login().await;
+    }
+
     let cfg = Config::load()?;
     let mut provider = OllamaProvider::new(&cfg.base_url, &cfg.model, cfg.num_ctx);
     let mut tools = tools::default_registry(cfg.project_dir.clone());
