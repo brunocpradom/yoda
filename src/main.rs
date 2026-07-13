@@ -2,9 +2,13 @@
 //! search tools, sessions, MCP, skills, and runtime model switching.
 //! See DESIGN.md for the full plan.
 
-use std::io::{self, Write};
+use std::borrow::Cow;
+use std::io::Write;
 
 use anyhow::{Context, Result};
+use rustyline::error::ReadlineError;
+use rustyline::highlight::Highlighter;
+use rustyline::{ColorMode, Config as RlConfig, Editor};
 
 use yoda::config::Config;
 use yoda::permission::{Mode, Policy};
@@ -13,8 +17,33 @@ use yoda::skill::Skill;
 use yoda::tools::ToolRegistry;
 use yoda::{agent, mcp, session, skill, tools, ui};
 
+/// rustyline helper that does nothing but colorize the prompt. rustyline
+/// measures the prompt it's handed in order to place the cursor, so we hand it
+/// the *plain* text (correct width) and re-apply the mode color here — the
+/// cursor lands right and the prompt still shows in color. Completion, hints,
+/// and validation are the derived no-ops.
+#[derive(rustyline::Completer, rustyline::Helper, rustyline::Hinter, rustyline::Validator)]
+struct PromptHelper;
+
+impl Highlighter for PromptHelper {
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
+        &'s self,
+        prompt: &'p str,
+        _default: bool,
+    ) -> Cow<'b, str> {
+        Cow::Owned(ui::color_prompt(prompt))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // One-shot subcommand: `yoda gmail-login` runs the interactive Gmail OAuth
+    // flow (opens a browser) and exits, so the headless daemon can later run off
+    // the cached refresh token. Everything else falls through to the REPL.
+    if std::env::args().nth(1).as_deref() == Some("gmail-login") {
+        return yoda::gmail::login().await;
+    }
+
     let cfg = Config::load()?;
     let mut provider = OllamaProvider::new(&cfg.base_url, &cfg.model, cfg.num_ctx);
     let mut tools = tools::default_registry(cfg.project_dir.clone());
@@ -44,17 +73,38 @@ async fn main() -> Result<()> {
     let mut last_usage: Option<Usage> = None;
     let workdir = ui::tilde(&cfg.project_dir.display().to_string());
 
+    // Line editor. Bracketed paste is on by default, so a multi-line paste's
+    // embedded newlines are inserted into the line instead of each submitting a
+    // turn — you can paste a block and then type your instruction before Enter.
+    // Also gives in-session history (up-arrow) and line editing. Color mode
+    // tracks the rest of the UI so `NO_COLOR`/piped runs stay plain.
+    let rl_config = RlConfig::builder()
+        .auto_add_history(true)
+        .color_mode(if ui::colors_enabled() {
+            ColorMode::Enabled
+        } else {
+            ColorMode::Disabled
+        })
+        .build();
+    let mut rl: Editor<PromptHelper, _> = Editor::with_config(rl_config)?;
+    rl.set_helper(Some(PromptHelper));
+
     loop {
         let context = last_usage.map(|u| (u.total(), cfg.num_ctx as u64));
         status_bar.draw(&workdir, context);
-        print!("{}", ui::mode_prompt(policy.mode().label()));
-        io::stdout().flush()?;
 
-        let mut input = String::new();
-        if io::stdin().read_line(&mut input)? == 0 {
-            break; // EOF (Ctrl-D)
-        }
-        let input = input.trim();
+        // Hand rustyline the plain prompt (so it measures width correctly); the
+        // helper re-adds color. Ctrl-C abandons the current line; Ctrl-D leaves.
+        let line = match rl.readline(ui::prompt_text(policy.mode().label())) {
+            Ok(line) => line,
+            Err(ReadlineError::Interrupted) => continue,
+            Err(ReadlineError::Eof) => break,
+            Err(e) => {
+                eprintln!("{}", ui::red(&format!("[input error: {e}]")));
+                break;
+            }
+        };
+        let input = line.trim();
         if input.is_empty() {
             continue;
         }
@@ -204,6 +254,21 @@ fn handle_command(input: &str, ctx: CommandCtx<'_>) -> bool {
                 }
             }
         }
+        "think" => match arg {
+            "" => println!(
+                "thinking: {} (usage: /think on|off)\n",
+                if provider.think() { "on" } else { "off" }
+            ),
+            "on" => {
+                provider.set_think(true);
+                println!("(thinking → on — reasoning models will show their work)\n");
+            }
+            "off" => {
+                provider.set_think(false);
+                println!("(thinking → off)\n");
+            }
+            _ => println!("usage: /think on|off\n"),
+        },
         "status" => print_status(cfg, provider, policy, history, last_usage),
         "context" => print_context(cfg, provider, tools, history, last_usage),
         "copy" => match last_assistant_reply(history) {
@@ -363,6 +428,7 @@ fn print_help() {
          /help              show this help\n  \
          /model [name]      show or switch the active model\n  \
          /mode [name]       permission mode: normal | auto | read-only\n  \
+         /think [on|off]    show or toggle the model's reasoning (on by default)\n  \
          /status            session at a glance: model, mode, work dir, context\n  \
          /context           visualize context-window usage\n  \
          /copy              copy the last reply to the clipboard (no wrap artifacts)\n  \

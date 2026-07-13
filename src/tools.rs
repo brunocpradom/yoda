@@ -79,7 +79,7 @@ impl ToolRegistry {
 }
 
 pub fn default_registry(project_dir: PathBuf) -> ToolRegistry {
-    ToolRegistry {
+    let mut registry = ToolRegistry {
         tools: vec![
             Box::new(ReadFile),
             Box::new(WriteFile),
@@ -95,7 +95,13 @@ pub fn default_registry(project_dir: PathBuf) -> ToolRegistry {
             Box::new(WebSearch),
             Box::new(AskUser),
         ],
+    };
+    // Gmail tools join only when Gmail is configured, so an unconfigured setup
+    // keeps the tool set small (local models choose poorly with many tools).
+    for tool in crate::gmail::tools() {
+        registry.push(tool);
     }
+    registry
 }
 
 // --- helpers ---
@@ -459,7 +465,16 @@ impl Tool for RunBash {
                     out.push_str(&String::from_utf8_lossy(&stderr));
                 }
                 let code = status.code().unwrap_or(-1);
-                Ok(truncate(format!("(exit {code})\n{}", out.trim_end())))
+                // Make "succeeded with no output" explicit. A bare `(exit 0)`
+                // reads to a small model as "the output wasn't captured", which
+                // tempts it to re-run the same command (e.g. `git status` on a
+                // clean tree returns nothing) — so spell out that empty is empty.
+                let body = out.trim_end();
+                Ok(truncate(if body.is_empty() {
+                    format!("(exit {code}) — no output")
+                } else {
+                    format!("(exit {code})\n{body}")
+                }))
             }
             Ok(Err(e)) => Err(anyhow!("command I/O failed: {e}")),
             Err(_elapsed) => {
@@ -947,6 +962,26 @@ fn decode_ddg_redirect(href: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn run_bash_marks_empty_output_explicitly() {
+        let tool = RunBash {
+            root: std::env::temp_dir(),
+        };
+        // `true` succeeds with no stdout/stderr — the model must see that it's
+        // genuinely empty, not an uncaptured result it should retry.
+        let out = tool.run(&json!({ "command": "true" })).await.unwrap();
+        assert_eq!(out, "(exit 0) — no output");
+    }
+
+    #[tokio::test]
+    async fn run_bash_includes_output_when_present() {
+        let tool = RunBash {
+            root: std::env::temp_dir(),
+        };
+        let out = tool.run(&json!({ "command": "echo hi" })).await.unwrap();
+        assert_eq!(out, "(exit 0)\nhi");
+    }
 
     #[test]
     fn normalize_url_keeps_http_and_https() {

@@ -29,11 +29,30 @@ pub async fn run_turn(
     let mut last_usage = None;
 
     for step in 0..MAX_STEPS {
-        // Animate a Yoda-speak spinner with an elapsed clock while the model
-        // (which may take many seconds locally) produces its reply.
-        let spinner = crate::ui::Spinner::start(crate::ui::thinking_phrase());
-        let result = provider.complete(history, &specs).await;
-        spinner.stop();
+        // Animate a Yoda-speak spinner with an elapsed clock until the model's
+        // first token arrives (which may be many seconds locally). When thinking
+        // is on, the model's reasoning then streams in live — dimmed, under a
+        // `thinking ▸` label — so the user watches it form instead of waiting for
+        // the whole block. The reasoning is shown but never stored in history.
+        let mut spinner = Some(crate::ui::Spinner::start(crate::ui::thinking_phrase()));
+        let mut pane: Option<crate::ui::ThinkingPane> = None;
+        // Scope the sink so its borrows on `spinner`/`pane` end before we touch
+        // them again below.
+        let result = {
+            let mut on_thinking = |delta: &str| {
+                // First reasoning token: tear down the spinner, open the live pane.
+                pane.get_or_insert_with(|| {
+                    spinner.take(); // drop → stop the spinner thread and clear its line
+                    crate::ui::ThinkingPane::new()
+                })
+                .push(delta);
+            };
+            provider.complete(history, &specs, &mut on_thinking).await
+        };
+        spinner.take(); // stop the spinner if no reasoning streamed (thinking off / non-reasoning model)
+        if let Some(mut pane) = pane.take() {
+            pane.finish(); // erase the live thinking window before the answer prints
+        }
 
         let mut completion = match result {
             Ok(c) => c,
