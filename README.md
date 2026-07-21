@@ -54,9 +54,24 @@ access outside it, and non-allowlisted shell commands, prompt for permission.
 /load [name]     load a saved conversation
 /sessions        list saved sessions
 /reset           clear history (keep system prompt)
+/kibitzer help   show Kibitzer commands and required options
 /help            show help
 /quit            leave
 ```
+
+The Yoda REPL can also start the local Kibitzer meeting copilot directly:
+
+```text
+/kibitzer reuniao --briefing-text "reunião sobre o roadmap"
+/kibitzer entrevista --stacks "Django, FastAPI" --briefing vaga.md
+/kibitzer status
+/kibitzer stop
+```
+
+Meeting and interview starts require a briefing; interviews also require
+`--stacks`. Run `/kibitzer help` for the complete usage. Natural aliases such
+as `ei yoda, sobe o kibitzer`, `status do kibitzer`, and `para o kibitzer` are
+accepted too; incomplete start requests print the missing options.
 
 ## Tools
 

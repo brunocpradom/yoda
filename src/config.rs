@@ -20,6 +20,10 @@ pub struct Config {
     /// system prompt + tool specs + a couple of file reads overflow it and the
     /// model "forgets" earlier turns (including that it has tools).
     pub num_ctx: u32,
+    /// Path to the Kibitzer launcher. Can be overridden with
+    /// `YODA_KIBITZER_BIN`; by default we discover the sibling project used by
+    /// this workspace, falling back to `kibitzer` on PATH.
+    pub kibitzer_bin: PathBuf,
 }
 
 impl Config {
@@ -29,6 +33,16 @@ impl Config {
             .canonicalize()
             .context("could not canonicalize current directory")?;
 
+        let kibitzer_bin = std::env::var_os("YODA_KIBITZER_BIN")
+            .map(PathBuf::from)
+            .or_else(|| {
+                project_dir
+                    .parent()
+                    .map(|p| p.join("ai_agents/kibitzer/bin/kibitzer"))
+                    .filter(|p| p.exists())
+            })
+            .unwrap_or_else(|| PathBuf::from("kibitzer"));
+
         Ok(Self {
             base_url: std::env::var("YODA_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:11434".into()),
@@ -37,6 +51,7 @@ impl Config {
             project_dir,
             allowed_commands: load_allowed_commands(),
             num_ctx: load_num_ctx()?,
+            kibitzer_bin,
         })
     }
 }

@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod config;
 pub mod gmail;
+pub mod kibitzer;
 pub mod mcp;
 pub mod permission;
 pub mod provider;
