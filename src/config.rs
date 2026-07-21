@@ -2,7 +2,7 @@
 //! overrides; later phases move it to a TOML file (model routing, fuller
 //! permission config, skills dir — see DESIGN.md §5).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -20,9 +20,9 @@ pub struct Config {
     /// system prompt + tool specs + a couple of file reads overflow it and the
     /// model "forgets" earlier turns (including that it has tools).
     pub num_ctx: u32,
-    /// Path to the Kibitzer launcher. Can be overridden with
-    /// `YODA_KIBITZER_BIN`; by default we discover the sibling project used by
-    /// this workspace, falling back to `kibitzer` on PATH.
+    /// Path to the Kibitzer launcher. See [`discover_kibitzer_bin`] — resolved
+    /// independently of the current directory, so `yoda` finds the launcher
+    /// from anywhere.
     pub kibitzer_bin: PathBuf,
 }
 
@@ -33,16 +33,6 @@ impl Config {
             .canonicalize()
             .context("could not canonicalize current directory")?;
 
-        let kibitzer_bin = std::env::var_os("YODA_KIBITZER_BIN")
-            .map(PathBuf::from)
-            .or_else(|| {
-                project_dir
-                    .parent()
-                    .map(|p| p.join("ai_agents/kibitzer/bin/kibitzer"))
-                    .filter(|p| p.exists())
-            })
-            .unwrap_or_else(|| PathBuf::from("kibitzer"));
-
         Ok(Self {
             base_url: std::env::var("YODA_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:11434".into()),
@@ -51,9 +41,34 @@ impl Config {
             project_dir,
             allowed_commands: load_allowed_commands(),
             num_ctx: load_num_ctx()?,
-            kibitzer_bin,
+            kibitzer_bin: discover_kibitzer_bin(),
         })
     }
+}
+
+/// Locate the Kibitzer launcher, in precedence order:
+///
+/// 1. `YODA_KIBITZER_BIN` — an explicit override always wins.
+/// 2. The sibling checkout next to this repo. The repo path is baked in at
+///    build time (`CARGO_MANIFEST_DIR`), *not* read from the current
+///    directory, which is the whole point: `cargo install`ed yoda finds the
+///    launcher no matter where it is run from. Rebuilding after moving the
+///    repo re-resolves it.
+/// 3. The bare name, left for `PATH` lookup at exec time.
+fn discover_kibitzer_bin() -> PathBuf {
+    if let Some(explicit) = std::env::var_os("YODA_KIBITZER_BIN") {
+        return PathBuf::from(explicit);
+    }
+    sibling_kibitzer(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from("kibitzer"))
+}
+
+/// The launcher's conventional home: a sibling of the yoda checkout.
+fn sibling_kibitzer(repo_dir: &Path) -> Option<PathBuf> {
+    repo_dir
+        .parent()
+        .map(|workspace| workspace.join("ai_agents/kibitzer/bin/kibitzer"))
 }
 
 /// Context window per request, overridable with `YODA_NUM_CTX`. 16k is a
@@ -120,6 +135,16 @@ fn default_commands() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kibitzer_is_looked_up_next_to_the_repo_not_the_cwd() {
+        assert_eq!(
+            sibling_kibitzer(Path::new("/home/dev/code/yoda")).unwrap(),
+            Path::new("/home/dev/code/ai_agents/kibitzer/bin/kibitzer"),
+        );
+        // A repo at the filesystem root has no sibling workspace to search.
+        assert_eq!(sibling_kibitzer(Path::new("/")), None);
+    }
 
     #[test]
     fn default_auto_allow_excludes_dangerous_commands() {

@@ -313,7 +313,10 @@ fn urlencode(s: &str) -> String {
     let mut u = reqwest::Url::parse("http://localhost/").expect("static URL");
     u.query_pairs_mut().append_pair("q", s);
     // u.query() is "q=<encoded>"; strip the "q=" prefix.
-    u.query().and_then(|q| q.strip_prefix("q=")).unwrap_or("").to_string()
+    u.query()
+        .and_then(|q| q.strip_prefix("q="))
+        .unwrap_or("")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -375,7 +378,10 @@ mod tests {
 
     #[test]
     fn urlencode_escapes_spaces_and_operators() {
-        assert_eq!(urlencode("is:unread newer_than:1d"), "is%3Aunread+newer_than%3A1d");
+        assert_eq!(
+            urlencode("is:unread newer_than:1d"),
+            "is%3Aunread+newer_than%3A1d"
+        );
     }
 
     // Live end-to-end: exercises auth::bearer() + the REST search against the

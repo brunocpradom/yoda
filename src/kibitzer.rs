@@ -178,11 +178,13 @@ pub async fn execute(cfg: &Config, request: &Request) -> Result<String> {
     };
 
     let bin = &cfg.kibitzer_bin;
-    let output = Command::new(bin)
-        .args(&args)
-        .output()
-        .await
-        .map_err(|e| anyhow!("não consegui executar o Kibitzer em {}: {e}", bin.display()))?;
+    let output = Command::new(bin).args(&args).output().await.map_err(|e| {
+        anyhow!(
+            "não consegui executar o Kibitzer em {}: {e}\n\
+                 Aponte o launcher com YODA_KIBITZER_BIN=/caminho/para/bin/kibitzer.",
+            bin.display()
+        )
+    })?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if !output.status.success() {

@@ -359,7 +359,10 @@ fn await_callback(expected_state: &str) -> Result<String> {
             respond(&mut stream, "Authorization failed.");
             bail!("authorization server returned error: {}", err.1);
         }
-        if params.iter().find(|(k, _)| k == "state").map(|(_, v)| v.as_str())
+        if params
+            .iter()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.as_str())
             != Some(expected_state)
         {
             respond(&mut stream, "Authorization failed (state mismatch).");
