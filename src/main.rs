@@ -15,7 +15,7 @@ use yoda::permission::{Mode, Policy};
 use yoda::provider::{Message, OllamaProvider, Usage};
 use yoda::skill::Skill;
 use yoda::tools::ToolRegistry;
-use yoda::{agent, mcp, session, skill, tools, ui};
+use yoda::{agent, kibitzer, mcp, session, skill, tools, ui};
 
 /// rustyline helper that does nothing but colorize the prompt. rustyline
 /// measures the prompt it's handed in order to place the cursor, so we hand it
@@ -107,6 +107,25 @@ async fn main() -> Result<()> {
         let input = line.trim();
         if input.is_empty() {
             continue;
+        }
+
+        // Kibitzer commands are deterministic local process controls. Handle
+        // them before the model so a natural-language request cannot be
+        // misinterpreted as an ordinary chat turn or an arbitrary shell call.
+        // `parse_input` only errors on input it already recognized as a
+        // Kibitzer request, so an error is always worth surfacing — including
+        // for the natural aliases, which would otherwise be silently swallowed
+        // into an ordinary chat turn.
+        match kibitzer::parse_input(input) {
+            Ok(Some(request)) => {
+                run_kibitzer(&cfg, &policy, &request).await;
+                continue;
+            }
+            Err(e) => {
+                println!("{}\n", ui::yellow(&format!("kibitzer: {e}")));
+                continue;
+            }
+            Ok(None) => {}
         }
 
         if let Some(rest) = input.strip_prefix('/') {
@@ -269,6 +288,8 @@ fn handle_command(input: &str, ctx: CommandCtx<'_>) -> bool {
             }
             _ => println!("usage: /think on|off\n"),
         },
+        // Note: `/kibitzer` never reaches here — the REPL loop intercepts it
+        // (and the natural aliases) before slash-command dispatch.
         "status" => print_status(cfg, provider, policy, history, last_usage),
         "context" => print_context(cfg, provider, tools, history, last_usage),
         "copy" => match last_assistant_reply(history) {
@@ -281,6 +302,23 @@ fn handle_command(input: &str, ctx: CommandCtx<'_>) -> bool {
         other => println!("unknown command /{other}. Try /help\n"),
     }
     false
+}
+
+async fn run_kibitzer(cfg: &Config, policy: &Policy, request: &kibitzer::Request) {
+    if request.mutates() && policy.mode() == Mode::ReadOnly {
+        println!(
+            "{}\n",
+            ui::red(
+                "Kibitzer não iniciado/parado: o modo read-only bloqueia alterações e processos."
+            )
+        );
+        return;
+    }
+    match kibitzer::execute(cfg, request).await {
+        Ok(output) if output.is_empty() => println!("(Kibitzer concluído)\n"),
+        Ok(output) => println!("{}\n", output),
+        Err(e) => println!("{}\n", ui::red(&format!("kibitzer: {e:#}"))),
+    }
 }
 
 /// `/status` — the session at a glance, Claude Code style: model, endpoint,
@@ -432,6 +470,7 @@ fn print_help() {
          /status            session at a glance: model, mode, work dir, context\n  \
          /context           visualize context-window usage\n  \
          /copy              copy the last reply to the clipboard (no wrap artifacts)\n  \
+         /kibitzer          start/stop the meeting copilot (use /kibitzer help)\n  \
          /skills            list available skills\n  \
          /skill <name>      activate a skill (inject its instructions)\n  \
          /save [name]       save the conversation (default: 'default')\n  \

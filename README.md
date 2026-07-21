@@ -39,6 +39,7 @@ Configuration via environment variables:
 | `YODA_BASE_URL` | `http://localhost:11434` | OpenAI-compatible endpoint |
 | `YODA_ALLOWED_COMMANDS` | safe read-only set | comma-separated programs `run_bash` may run without asking (the default excludes code-executors like `cargo`/`git`/`find` and file-dumpers like `cat`/`grep` — those prompt) |
 | `YODA_ALLOW_LOCAL_FETCH` | unset | set to `1` to let `web_fetch` reach `localhost`/private/loopback addresses (off by default to block SSRF) |
+| `YODA_KIBITZER_BIN` | sibling checkout, else `kibitzer` on `PATH` | path to the Kibitzer launcher |
 
 The working directory is the "project" — file access inside it is auto-allowed;
 access outside it, and non-allowlisted shell commands, prompt for permission.
@@ -54,9 +55,29 @@ access outside it, and non-allowlisted shell commands, prompt for permission.
 /load [name]     load a saved conversation
 /sessions        list saved sessions
 /reset           clear history (keep system prompt)
+/kibitzer help   show Kibitzer commands and required options
 /help            show help
 /quit            leave
 ```
+
+The Yoda REPL can also start the local Kibitzer meeting copilot directly:
+
+```text
+/kibitzer reuniao --briefing-text "reunião sobre o roadmap"
+/kibitzer entrevista --stacks "Django, FastAPI" --briefing vaga.md
+/kibitzer status
+/kibitzer stop
+```
+
+Meeting and interview starts require a briefing; interviews also require
+`--stacks`. Run `/kibitzer help` for the complete usage. Natural aliases such
+as `ei yoda, sobe o kibitzer`, `status do kibitzer`, and `para o kibitzer` are
+accepted too; incomplete start requests print the missing options.
+
+The launcher is looked up next to the yoda checkout (`../ai_agents/kibitzer/
+bin/kibitzer`), resolved at build time rather than from the working directory —
+so an installed `yoda` finds it from anywhere. Point `YODA_KIBITZER_BIN` at the
+launcher if it lives elsewhere; after moving the checkout, rebuild.
 
 ## Tools
 

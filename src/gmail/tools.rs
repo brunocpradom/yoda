@@ -67,7 +67,9 @@ impl Tool for GmailSearch {
     }
     fn actions(&self, _args: &Value) -> Vec<Action> {
         // Network egress carrying private mail data — gate like a fetch.
-        vec![Action::Fetch("https://gmail.googleapis.com (search)".into())]
+        vec![Action::Fetch(
+            "https://gmail.googleapis.com (search)".into(),
+        )]
     }
     async fn run(&self, args: &Value) -> Result<String> {
         let query = get_str(args, "query")?;
